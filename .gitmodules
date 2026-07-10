@@ -1,0 +1,9 @@
+[submodule "vendor/flick"]
+	path = vendor/flick
+	url = https://github.com/utopian-society/Flick.git
+[submodule "apps/desktop/src/lib/vendor/liquid-glass"]
+	path = apps/desktop/src/lib/vendor/liquid-glass
+	url = https://github.com/utopian-society/liquid-glass-svelte.git
+[submodule "apps/desktop/src/lib/vendor/amll"]
+	path = apps/desktop/src/lib/vendor/amll
+	url = https://github.com/utopian-society/applemusic-like-lyrics.git
