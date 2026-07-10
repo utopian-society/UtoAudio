@@ -1,0 +1,12 @@
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
+*.wasm binary
+
+package-lock.json text eol=lf
+pnpm-lock.yaml text eol=lf
+Cargo.lock text eol=lf
