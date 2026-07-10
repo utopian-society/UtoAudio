@@ -1,0 +1,31 @@
+# This file is part of utoaudio, licensed under AGPL-3.0.
+#
+# Thin adapter crate: depends on the vendor/flick submodule for the actual
+# audio engine, and exposes a clean serde API surface (tauri_api) for the
+# audio-ffi Tauri command layer.
+
+[package]
+name = "utoaudio-audio-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+license = "AGPL-3.0"
+authors = ["utoaudio contributors"]
+repository = "https://github.com/utopia/utoaudio"
+description = "Adapter wrapping the Flick audio engine submodule with a serde Tauri API"
+
+[lib]
+name = "utoaudio_audio_core"
+path = "src/lib.rs"
+
+[features]
+default = ["uac2"]
+uac2 = ["rust_lib_flick_player/uac2", "dep:rusb"]
+
+[dependencies]
+rust_lib_flick_player = { path = "../../vendor/flick/rust" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tokio = { version = "1", features = ["sync", "macros"] }
+rusb = { version = "0.9", optional = true }
