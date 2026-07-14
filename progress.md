@@ -1953,3 +1953,124 @@ modified — this step only establishes the submodule foundation.
 4. **`flutter_rust_bridge` v2.12.0 is now a workspace dependency**
    (transitive through the submodule). It adds ~20 crates to the dependency
    graph but is not invoked at runtime by our adapter.
+
+## What prompt 17 did — Migrated lyric parsers from inline AMLL port to submodule consumption
+
+> Replaced the inline lyric-format parsers (`lrc`, `yrc`, `qrc`, `ttml`)
+> in `apps/desktop/src/lib/lyric-parser/` with imports from the
+> `apps/desktop/src/lib/vendor/amll` git submodule. Kept the Svelte 5
+> lyric player components inline (they are a unique port with no
+> equivalent in the upstream AMLL monorepo).
+
+### Files created / modified
+
+- `apps/desktop/src/lib/lyric-parser/index.ts` — rewritten as a thin
+  adapter that imports parsers from the submodule's pre-built output
+  (`../vendor/amll/packages/lyric/dist/formats-{lrc,yrc,qrc}.mjs` and
+  `../vendor/amll/packages/ttml/dist/index.mjs`), adapts the submodule's
+  `AmllLyricLine` shape to our inline `LyricLine` (mapping `ruby[i].word`
+  → `ruby[i].text`), and exposes the same `parseLyrics` /
+  `parseLyricsFull` / `detectFormat` API plus per-format
+  `parseLrc`/`parseYrc`/`parseQrc`/`parseTTML`/`stringifyLrc`/… re-exports.
+- `apps/desktop/scripts/build-amll-parsers.mjs` — new build script that
+  bundles the five submodule parser entry points with esbuild and
+  writes sibling `.d.mts` declarations. Registered as
+  `build:submodule` in `package.json`, wired into `prebuild` and
+  `check`.
+- `apps/desktop/package.json` — added `pako ^3.0.1` (runtime dep of
+  the upstream lyric package) and `esbuild ^0.28.1` (devDep for the
+  pre-build script); added `build:submodule` script and `prebuild` hook.
+- `apps/desktop/tsconfig.app.json` — added
+  `exclude: ["src/lib/vendor/**"]` so svelte-check doesn't try to
+  type-check the submodule's source files (which use `.ts`-extension
+  imports and have external deps not in our project).
+- `pnpm-lock.yaml` — updated for `pako` + `esbuild`.
+
+### Removed (inline parser copies)
+
+- `apps/desktop/src/lib/lyric-parser/lrc.ts`
+- `apps/desktop/src/lib/lyric-parser/yrc.ts`
+- `apps/desktop/src/lib/lyric-parser/qrc.ts`
+- `apps/desktop/src/lib/lyric-parser/ttml.ts`
+- `apps/desktop/src/lib/lyric-parser/utils.ts`
+
+### Kept inline (not migratable)
+
+- `apps/desktop/src/components/lyrics/{LyricPlayer,FluidBackground,LyricLine}.svelte`
+  and their helpers (`controller.ts`, `spring.ts`, `anim.ts`, `color.ts`,
+  `types.ts`, `index.ts`) — hand-written Svelte 5 ports of AMLL's React
+  / Pixi.js-based components. The submodule's `core` package exposes a
+  plain-JS `DomLyricPlayer` class and a Pixi.js `MeshGradientRenderer`;
+  neither is a drop-in replacement for our Svelte 5 components with WebGL
+  fluid background and spring-physics scroll.
+- `apps/desktop/src/lib/types/lyrics.ts` — Svelte-component-specific
+  type extensions (`LyricTheme`, `LyricPlayerProps`, `AnimationMode`,
+  `SimpleLyricLine`, `fromSimpleLyricLines`, `lineText`, …) that don't
+  exist in the submodule.
+
+### Verification
+
+| Command | Result |
+|---|---|
+| `pnpm run build:submodule` | ✅ 5 `.mjs` bundles + 5 `.d.mts` declarations generated |
+| `pnpm run check` | ✅ 0 errors, 5 warnings (pre-existing self-closing-tag warnings in `src/lib/liquid-glass/LiquidGlass.svelte`) |
+| `pnpm run build` | ⚠️ fails with `lightningcss minify` `Unexpected token Semicolon` — confirmed pre-existing (same failure on a clean stash of the previous commit); originates in `src/lib/liquid-glass/` submodule, not in this prompt's changes |
+
+### Architectural decisions
+
+1. **Consume the submodule via pre-built `.mjs` output, not source `.ts`.**
+   The AMLL submodule is a pnpm workspace monorepo whose TypeScript
+   source uses `.ts`-extension imports (`import x from "./types.ts"`) and
+   has external npm dependencies (`@pixi/*`, `gl-matrix`, `tsdown`, …)
+   incompatible with this project's `tsc` settings. Running the
+   submodule's own build (`pnpm install` + Nx/tsdown) fails because it
+   pins `pnpm@11.1.0` (requires Node 22+, our environment is Node 20).
+   The four parser entry points used here have no external npm deps, so
+   bundling them with esbuild (and shipping sibling `.d.mts`
+   declarations) gives us the submodule's code without touching the
+   submodule's git state (the submodule's `.gitignore` already excludes
+   `**/dist`).
+
+2. **Kept Svelte 5 components inline.** The prompt assumed the
+   submodule contained Svelte components. It doesn't — it contains the
+   upstream React/Pixi.js code. The inline `LyricPlayer.svelte`,
+   `FluidBackground.svelte`, and `LyricLine.svelte` are a unique Svelte 5
+   port (scroll spring, karaoke mask sweep, WebGL fluid background with
+   palette sampling) that has no equivalent in the submodule. Replacing
+   them would require rewriting the Now Playing page.
+
+3. **Adapter layer for ruby-field-name divergence.** The upstream
+   ttml package returns ruby annotations as `LyricWordBase[]`
+   (`{ startTime, endTime, word }`) while our Svelte components expect
+   `LyricRuby[]` (`{ startTime, endTime, text }`). A 15-line `adaptLine`
+   helper maps between the two — keeps the Svelte component code
+   unchanged.
+
+4. **Build script registered as `prebuild` and `check` dependency.**
+   On a fresh clone, `pnpm install && pnpm run build` (or `pnpm run
+   check`) regenerates the `.mjs`/`.d.mts` artifacts automatically. No
+   manual setup step required.
+
+### Known issues / hand-off notes
+
+1. **Build is blocked by a pre-existing liquid-glass CSS issue** (see
+   Verification table). Independent of this prompt — will need a
+   follow-up to fix the SVG/CSS in `src/lib/liquid-glass/`.
+
+2. **The submodule's `core` package is not consumed.** Its
+   `DomLyricPlayer` (plain-JS class) and Pixi.js-based background
+   renderer are not used. Our Svelte components remain the source of
+   truth for the Now Playing page. Future work could either wrap the
+   submodule's `DomLyricPlayer` in a Svelte adapter (replacing our
+   hand-written component) or contribute the Svelte port upstream.
+
+3. **`pako` is the only new runtime dependency** (added by the
+   submodule's lyric package for `eqrc`/zlib-based format decompression).
+   It is bundled into the lyric dist files and imported at runtime only
+   when those formats are parsed.
+
+4. **Submodule `dist/` directories are build artifacts.** They're
+   generated by `pnpm run build:submodule` and git-ignored by the
+   submodule itself (via `**/dist` in the submodule's `.gitignore`).
+   They live inside `src/lib/vendor/amll/...` but are not tracked by
+   either the submodule's git or the main repo's git.
