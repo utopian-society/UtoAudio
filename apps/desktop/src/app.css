@@ -1,0 +1,103 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── utoaudio liquid-glass palette ──────────────────────────────────────── */
+/* The lyric subsystem keeps its own `--amll-lp-*` custom properties in
+   components/lyrics/styles.css — this namespace is independent.
+
+   Pure white base with highly transparent glass surfaces. Black text.
+   Light-green and light-yellow accents. The glass is see-through — you
+   can see the white base through it — and the rim/border are subtle so
+   the surface doesn't read as "shiny". */
+
+:root {
+    color-scheme: light;
+
+    /* Brand accents — light pale green + light pale yellow */
+    --uto-accent-green: #bef264; /* lime-300 — lighter pale green */
+    --uto-accent-yellow: #fef08a; /* yellow-200 — lighter pale yellow */
+
+    /* Pure white background */
+    --uto-bg: #ffffff;
+
+    /* Highly transparent glass surface */
+    --uto-surface: rgba(255, 255, 255, 0.25);
+
+    /* Glass recipe — moderate blur, neutral brightness */
+    --uto-glass-blur: 20px;
+    --uto-glass-saturate: 100%;
+    --uto-glass-brightness: 1.0;
+
+    /* Glass rim / border — subtle, not shiny */
+    --uto-rim-light: rgba(255, 255, 255, 0.4);
+    --uto-glass-border: rgba(0, 0, 0, 0.06);
+    --uto-glow-accent: rgba(190, 242, 100, 0.2);
+
+    /* Text colors — black on white (WCAG AAA) */
+    --uto-text: #000000;
+    --uto-text-strong: #000000;
+    --uto-text-muted: #1a1a1a;
+    --uto-text-faint: #4a4a4a;
+
+    /* Scrollbar — dark on white */
+    --uto-scrollbar-thumb: rgba(0, 0, 0, 0.15);
+    --uto-scrollbar-thumb-hover: rgba(0, 0, 0, 0.25);
+
+    /* Slider thumb border */
+    --uto-slider-thumb-border: #ffffff;
+
+    /* Ambient gradient — subtle green glow */
+    --uto-ambient-tint: rgba(190, 242, 100, 0.05);
+
+    /* Glass gradient — highly transparent */
+    --uto-glass-gradient-start: rgba(255, 255, 255, 0.35);
+    --uto-glass-gradient-end: rgba(255, 255, 255, 0.15);
+
+    /* Inset / shadow — subtle depth */
+    --uto-glass-inset-bottom: rgba(0, 0, 0, 0.06);
+    --uto-glass-outer-shadow: rgba(0, 0, 0, 0.12);
+
+    /* Hover tint — green */
+    --uto-hover-tint: rgba(190, 242, 100, 0.08);
+    --uto-hover-tint-strong: rgba(190, 242, 100, 0.15);
+
+    /* Input / chip background — transparent */
+    --uto-input-bg: rgba(255, 255, 255, 0.4);
+    --uto-input-border: rgba(0, 0, 0, 0.08);
+
+    /* Transport gradient — white fade */
+    --uto-transport-gradient: linear-gradient(
+        to top,
+        rgba(255, 255, 255, 0.9),
+        rgba(255, 255, 255, 0.5) 60%,
+        transparent
+    );
+
+    /* Play button text — black on lime */
+    --uto-play-text: #000000;
+}
+
+html,
+body,
+#app {
+    height: 100%;
+    margin: 0;
+    background: var(--uto-bg);
+    color: var(--uto-text);
+}
+
+/* ── Global scrollbar thinness ───────────────────────────────────────── */
+::-webkit-scrollbar {
+    width: 8px;
+}
+::-webkit-scrollbar-thumb {
+    background: var(--uto-scrollbar-thumb);
+    border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--uto-scrollbar-thumb-hover);
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}

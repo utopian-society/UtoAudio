@@ -29,3 +29,8 @@ gen/
 # editor
 .idea/
 *.iml
+
+opencode.json
+
+prompts/
+prompt.md

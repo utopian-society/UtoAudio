@@ -1,0 +1,75 @@
+/* This file is part of utoaudio, licensed under AGPL-3.0. */
+/* Derivative work based on AMLL (https://github.com/amll-dev/applemusic-like-lyrics), */
+/* which is also licensed under AGPL-3.0. See LICENSE for full license text. */
+
+/**
+ * Apple Music–like lyric styling helpers.
+ *
+ * The Svelte components own scoped styles for the line/word/bg DOM; this file
+ * provides the shared CSS custom properties and Tailwind-ish utility layer the
+ * prompt asks for (Apple Music uses dark-by-default, dimmed inactive lines,
+ * plus-lighter mix-blend over the fluid background, and a CSS-variable theme
+ * derived from album art via `color.extractTheme`).
+ *
+ * Import once per app shell:  `import './components/lyrics/styles.css';`
+ */
+
+:root,
+.amll-theme {
+	/* Lyric layer colour (text + interlude dots). White default → set by theme. */
+	--amll-lp-color: #ffffff;
+	--amll-lp-font-size: max(max(5vh, 2.5vw), 12px);
+	--amll-lp-bg-line-scale: 0.7;
+	--amll-lp-width: 100%;
+	--lyric-line-padding-x: 1em;
+	/* Karaoke mask alphas; animated per-frame by the controller. */
+	--bright-mask-alpha: 1;
+	--dark-mask-alpha: 0.2;
+}
+
+/* Dark mode is the default; .amll-light flips the foreground colour. */
+.amll-light {
+	--amll-lp-color: #111111;
+}
+
+/* Mobile (≤768px): Apple Music uses a larger base font + tighter padding. */
+@media (max-width: 768px) {
+	:root,
+	.amll-theme {
+		--amll-lp-font-size: max(8vw, 12px);
+		--lyric-line-padding-x: 0;
+	}
+}
+
+/* Tailwind-style utility composition for the lyric shell. */
+.amll-shell {
+	@apply relative h-full w-full overflow-hidden bg-slate-950 text-white;
+	contain: strict;
+}
+
+/* The plus-lighter bloom requires a non-white backdrop to read correctly; only
+   enable the bloom when the fluid background is on (the component toggles it). */
+.amll-bloom {
+	mix-blend-mode: plus-lighter;
+}
+
+/* Dim inactive lyrics uniformly when not handled by per-line opacity. */
+.amll-lyric-player:not(.playing) .amll-lyric-line-wrapper {
+	filter: none;
+}
+
+/* Sub-line (translation / romanization) gradient dim for a softer look. */
+.amll-lyric-sub-line,
+.amll-lyric-sub-line.roman {
+	color: color-mix(in srgb, var(--amll-lp-color) 55%, transparent);
+}
+
+/* Reduced-motion: drop the morph + bob animations. */
+@media (prefers-reduced-motion: reduce) {
+	.amll-lyric-line-wrapper,
+	.amll-lyric-word.emphasize,
+	.amll-lyric-bg-wrapper {
+		animation: none !important;
+		transition: none !important;
+	}
+}

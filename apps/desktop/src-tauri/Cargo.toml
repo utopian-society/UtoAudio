@@ -1,0 +1,29 @@
+# This file is part of utoaudio, licensed under AGPL-3.0.
+
+[package]
+name = "utoaudio-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "utoaudio desktop Tauri shell"
+
+[lib]
+name = "utoaudio_desktop_lib"
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+audio-ffi = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+tokio = { workspace = true, features = ["sync"] }
+
+[features]
+# No optional features yet. The custom titlebar is rendered in the frontend.
+default = []

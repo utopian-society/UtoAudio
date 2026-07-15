@@ -1,0 +1,26 @@
+# This file is part of utoaudio, licensed under AGPL-3.0.
+
+[package]
+name = "audio-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Tauri command bindings bridging the frontend to audio-core"
+
+[features]
+# Forward to audio-core's UAC2 feature (USB Audio Class 2.0 device
+# enumeration). Default-enabled to mirror audio-core's own defaults so the
+# `list_uac2_devices` command is compiled in for normal builds.
+default = ["uac2"]
+uac2 = ["audio-core/uac2"]
+
+[dependencies]
+audio-core = { workspace = true }
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+serde_json = "1"
+tokio = { workspace = true, features = ["sync"] }
+rusqlite = { version = "0.31", features = ["bundled"] }

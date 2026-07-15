@@ -1,0 +1,26 @@
+# utoaudio — workspace root
+#
+# Audiophile-grade, bit-perfect, cross-platform music player.
+# All workspace members are AGPL-3.0.
+
+[workspace]
+resolver = "2"
+members = ["crates/*", "apps/desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "AGPL-3.0"
+authors = ["utoaudio contributors"]
+repository = "https://github.com/utopia/utoaudio"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+audio-core = { path = "crates/audio-core", package = "utoaudio-audio-core" }
+audio-ffi = { path = "crates/audio-ffi" }
