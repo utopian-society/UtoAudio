@@ -2262,5 +2262,107 @@ deleted. The actual implementation diverged:
    `git push` to the utopian-society forks — requires GitHub auth.
 
 5. **`pnpm tauri dev` end-to-end smoke test deferred.** No display in this
+    environment. The wiring compiles, typechecks, and bundles; live window
+    verification needs a workstation with a display.
+
+---
+
+## What prompt 20 did — Added upstream remotes, sync workflow docs, script, and decorated README
+
+> Added `upstream` remotes to all three submodules (pointing to the original
+> repos: moss-apps/Flick, amll-dev/applemusic-like-lyrics, danilofiumi/liquid-glass-svelte),
+> created `CONTRIBUTING.md` documenting the fork → upstream contribution workflow,
+> created `scripts/sync-submodules.sh` (read-only by default, `--pull`/`--push` flags),
+> and overhauled `README.md` with the full project identity, visual language,
+> architecture table, repository layout tree, build commands, and contribution summary.
+
+### Files created / modified
+
+**New files**
+- `CONTRIBUTING.md` — fork → upstream contribution workflow documentation.
+  Covers: submodule remote structure (origin = utopian-society fork, upstream =
+  original repo), how to pull upstream changes into the submodule and update the
+  main repo reference, how to contribute changes back to upstream (branch → fork
+  → PR → merge → pull back → bump submodule), the `sync-submodules.sh` script
+  usage, general contribution guidelines (license, visual identity, cross-platform,
+  progress.md append rule, verification commands), and a code of conduct.
+- `scripts/sync-submodules.sh` — submodule sync script. Read-only by default:
+  fetches all submodule remotes and reports per-submodule status (HEAD sha,
+  origin/main sha, upstream/main sha, ahead/behind counts, diverged flag). `--pull`
+  merges origin/main into each submodule's HEAD. `--push` pushes HEAD to
+  origin/main. Coloured output (green = ahead, yellow = behind/diverged, red =
+  behind upstream).
+
+**Modified files**
+- `README.md` — full rewrite with decoration. Added: visual identity section
+  (palette + page table), architecture section (submodule table, Rust crate table,
+  Svelte frontend summary), repository layout tree, expanded build section with
+  quick-start commands, contributing section (summary + sync script invocation),
+  and a unified third-party attribution list.
+- `progress.md` — appended this section (prompt 20).
+
+**Submodule remotes added**
+- `vendor/flick` → `upstream` = `https://github.com/moss-apps/Flick.git`
+- `apps/desktop/src/lib/vendor/amll` → `upstream` = `https://github.com/amll-dev/applemusic-like-lyrics.git`
+- `apps/desktop/src/lib/vendor/liquid-glass` → `upstream` = `https://github.com/danilofiumi/liquid-glass-svelte.git`
+
+### Verification
+
+| Command | Result |
+|---|---|
+| `cd vendor/flick && git remote -v` | ✅ origin (utopian-society/Flick) + upstream (moss-apps/Flick) |
+| `cd apps/desktop/src/lib/vendor/amll && git remote -v` | ✅ origin (utopian-society/applemusic-like-lyrics) + upstream (amll-dev/applemusic-like-lyrics) |
+| `cd apps/desktop/src/lib/vendor/liquid-glass && git remote -v` | ✅ origin (utopian-society/liquid-glass-svelte) + upstream (danilofiumi/liquid-glass-svelte) |
+| `./scripts/sync-submodules.sh` | ✅ script runs, reports all three submodules (HEAD/ahead/behind/diverge) |
+| `cargo build --workspace` | ✅ exit 0 (no new warnings or errors — pre-existing inherited warnings unchanged) |
+
+### Architectural decisions
+
+1. **Remotes follow the `origin`/`upstream` convention.** The utopian-society
+   fork is `origin` (where changes are pushed), the original project is
+   `upstream` (where PRs are sent). This matches the standard open-source fork
+   workflow and GitHub's own terminology.
+
+2. **Sync script is read-only by default.** Running `./scripts/sync-submodules.sh`
+   with no flags fetches both remotes and reports status — no writes. This makes
+   it safe to run at any time as a diagnostic. `--pull` and `--push` are
+   explicit gates for write operations.
+
+3. **Script uses coloured terminal output** (bold + ANSI colour codes) for
+   readability. Green = ahead (commits ready to push), yellow = diverged /
+   behind fork, red = behind upstream (upstream has newer commits). The final
+   line reminds the user to run with `--pull` or `--push` if they want to act.
+
+4. **README.md is now the project's public face.** It presents the visual
+   identity, architecture, build commands, and contribution workflow in a single
+   scroll — no need to read `AGENTS.md` or `progress.md` to understand the
+   project.
+
+5. **CONTRIBUTING.md covers the full contribution cycle.** From submodule
+   modification → fork push → upstream PR → merge → pull back → main repo
+   submodule bump. Every step has an explicit shell command. This is the
+   workflow that motivated the entire submodule migration (prompts 15-19).
+
+### Known issues / hand-off notes
+
+1. **No pull or push was performed.** Per the prompt's constraint, only remotes
+   and documentation were set up. The actual sync (pull from upstream, push to
+   fork) is deferred to a developer with GitHub auth in this environment.
+
+2. **The pre-existing upstream DSD test failure remains** (inherited from
+   Flick `953958d`, documented in prompt 2).
+
+3. **The `unused import: Path` warning in `crates/audio-ffi/src/settings.rs`**
+   remains (inherited from prompt 8, documented in prompt 9).
+
+4. **The five self-closing div warnings in the liquid-glass submodule remain**
+   (inherited from prompt 8, documented in prompt 18).
+
+5. **Submodule fork pushes deferred.** Flick fork at `510576e` (1 commit
+   ahead — `crate-type` addition), liquid-glass fork at `66a0ddb` (1 commit
+   ahead — `LiquidGlass.svelte` addition). Both need `git push` to the
+   utopian-society forks — requires GitHub auth.
+
+6. **`pnpm tauri dev` end-to-end smoke test deferred.** No display in this
    environment. The wiring compiles, typechecks, and bundles; live window
    verification needs a workstation with a display.
