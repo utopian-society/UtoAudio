@@ -2364,5 +2364,63 @@ deleted. The actual implementation diverged:
    utopian-society forks — requires GitHub auth.
 
 6. **`pnpm tauri dev` end-to-end smoke test deferred.** No display in this
-   environment. The wiring compiles, typechecks, and bundles; live window
-   verification needs a workstation with a display.
+    environment. The wiring compiles, typechecks, and bundles; live window
+    verification needs a workstation with a display.
+
+---
+
+## What prompt 21 did — Fixed vendored LiquidGlass.svelte: tint z-index, displacement scale, content z-index
+
+> The `.lg-tint` layer was visually overriding icons and text inside
+> `LiquidGlass` because it had no `z-index` or `pointer-events: none`, and the
+> SVG `feDisplacementMap` was set to `scale="230"` which aggressively displaced
+> pixels making content illegible.
+
+### Files modified
+
+- `apps/desktop/src/lib/vendor/liquid-glass/LiquidGlass.svelte` —
+  - Added `z-5 pointer-events-none` utility classes to the `.lg-tint` div (line 53).
+  - Added a `.lg-tint` CSS rule in the `<style>` block (`z-index: 5; pointer-events: none;`).
+  - Reduced `feDisplacementMap` `scale` from `230` to `80` (line 81).
+  - `.lg-content` already at `z-index: 10` (unchanged, verified).
+
+### Verification
+
+| Command | Result |
+||---|---|
+| `cd apps/desktop && pnpm run check` | ✅ exit 0 — svelte-check **0 errors**, 5 warnings (all pre-existing in vendored `LiquidGlass.svelte`: self-closing div tags; none introduced here) |
+| `cd apps/desktop && pnpm run build` | ✅ exit 0 — 162 modules; `index-*.js` 135.22 KB / **44.97 KB gzip** (within ≤50 KB budget); `index-*.css` 45.18 KB / 7.79 KB gzip |
+
+### Architectural decisions
+
+1. **Both Tailwind utility classes AND a CSS rule for `.lg-tint`.** The prompt
+   explicitly required `z-index: 5` and `pointer-events: none` on `.lg-tint`.
+   Adding them as Tailwind utility classes (`z-5 pointer-events-none`) on the
+   div gives immediate effect, and the CSS rule in the `<style>` block matches
+   the pattern of other glass layers (`.lg-glass-filter`, `.lg-shadow`,
+   `.lg-content`) that define their positioning in scoped CSS.
+
+2. **`scale` reduced to 80 (not 0).** A displacement map at scale 0 would
+   be a no-op (no glass distortion). Scale 80 retains a subtle glass-distortion
+   effect while keeping content legible. The prompt's value was accepted
+   exactly.
+
+3. **Component props API unchanged.** `children`, `class`, `style`, `roundness`,
+   `accent`, `contrast` — all unchanged. No new dependencies.
+
+### Known issues / hand-off notes
+
+1. **Live visual verification deferred.** No display in this environment to
+   run `pnpm tauri dev` and eyeball the glass surfaces with icons/text inside.
+   The CSS-variable sweep is mechanical and `pnpm run check` is clean, but a
+   human should confirm the `.lg-tint` no longer washes out content and the
+   displacement map at scale 80 produces a pleasant subtle distortion.
+
+2. **The five self-closing div warnings remain** (pre-existing in the vendored
+   component; documented in prompt 8). Not introduced by this prompt.
+
+3. **The `unused import: Path` warning in `settings.rs` remains** (inherited
+   from prompt 8, documented in prompt 9).
+
+4. **The pre-existing upstream DSD test failure remains** (inherited from
+   Flick `953958d`, documented in prompt 2).
