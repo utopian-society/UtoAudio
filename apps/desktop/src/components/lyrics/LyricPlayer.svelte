@@ -200,8 +200,13 @@
 	});
 
 	$effect(() => {
-		if (!containerEl || !theme) return;
-		containerEl.style.setProperty('--amll-lp-color', theme.color ?? '#ffffff');
+		if (!containerEl) return;
+		// Keep lyric text neutral white; the album-art theme drives only the
+		// fluid background, not the lyric foreground.
+		containerEl.style.setProperty('--amll-lp-color', '#ffffff');
+		containerEl.style.setProperty('color', '#ffffff');
+		containerEl.style.setProperty('mix-blend-mode', 'normal');
+		containerEl.style.setProperty('isolation', 'isolate');
 	});
 
 	const fontSize = $derived(
@@ -222,5 +227,11 @@
 		height: 100%;
 		overflow: hidden;
 		font-size: var(--amll-lp-font-size, max(max(5vh, 2.5vw), 12px));
+	}
+
+	:global(.amll-lyric-player-wrapper .amll-lyric-player),
+	:global(.amll-lyric-player-wrapper .amll-lyric-player *) {
+		color: #ffffff !important;
+		mix-blend-mode: normal !important;
 	}
 </style>

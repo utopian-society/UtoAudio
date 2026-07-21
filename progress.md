@@ -3285,3 +3285,19 @@ _Frontend:_
 ### Known issues / hand-off notes
 - A deeper cleanup could switch Now Playing to `convertFileSrc(album_art_path)` like Playlist/Library, removing the `get_album_art_data` IPC copy and the blob URL lifecycle entirely.
 - The existing blob URL leak remains: `loadAlbumArt` creates a new object URL on track change and does not revoke the previous URL.
+
+## What prompt 31 did — Fix production lyric foreground inheriting album-art colors
+
+### Files created / modified
+- `apps/desktop/src/components/lyrics/LyricPlayer.svelte` — stopped assigning `--amll-lp-color` from the album-art theme and forced the AMLL lyric player subtree to neutral white with normal blend mode.
+- `progress.md` — appended this session log.
+
+### Verification
+- `cd apps/desktop && pnpm run build` — passes. Vite/Svelte reports pre-existing warnings in vendored `LiquidGlass.svelte` and one `Playlist.svelte` a11y warning.
+
+### Architectural decisions
+- Root cause: `NowPlaying.svelte` passes `lyricTheme` into `LyricPlayer`, and `LyricPlayer.svelte` used `theme.color` to set `--amll-lp-color`. In packaged builds, the AMLL CSS uses that variable for lyric text color, so lyrics became purple/red/etc. depending on the album-art-derived palette instead of staying white.
+- Minimal fix: keep the album-art-derived `theme` for the fluid background path only and pin the lyric foreground to `#ffffff` inside the wrapper. Also set `mix-blend-mode: normal` with a global scoped rule so AMLL's default `plus-lighter` blend cannot tint text against colorful backgrounds.
+
+### Known issues / hand-off notes
+- The production window was not live-smoke-tested in this headless environment; the frontend production bundle builds successfully.
