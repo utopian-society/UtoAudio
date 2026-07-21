@@ -23,6 +23,15 @@ export interface FileEntry {
   size?: number;
   /** Last-modified time in milliseconds since epoch (undefined if unknown). */
   modified?: number;
+  /** Absolute path to cover art (discovered during scan), if any. */
+  albumArtPath?: string;
+  /** Tag-based track title (from ID3/Vorbis/FLAC tags). Undefined for
+   *  directories or untagged files — fall back to `name` in that case. */
+  title?: string;
+  /** Sample rate in Hz, read from the audio file's properties. */
+  sampleRate?: number;
+  /** Bit depth in bits per sample (e.g. 16, 24). Undefined for lossy formats. */
+  bitsPerSample?: number;
 }
 
 /**

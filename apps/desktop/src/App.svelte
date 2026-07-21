@@ -39,6 +39,17 @@
 
 	$effect(() => {
 		rehydrateSettings();
+		// Disable the default WebKitGTK context menu (Inspect Element, etc.)
+		// This preserves right-click for future custom context menus
+		document.addEventListener('contextmenu', (e) => {
+			e.preventDefault();
+		});
+		return () => {
+			// Cleanup on unmount (though App.svelte never unmounts)
+			document.removeEventListener('contextmenu', (e) => {
+				e.preventDefault();
+			});
+		};
 	});
 </script>
 

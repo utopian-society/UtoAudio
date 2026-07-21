@@ -15,10 +15,13 @@ export default defineConfig({
       ignored: ['**/src-tauri/**'],
     },
     fs: {
-      allow: ['..'],
+      allow: ['..', '../..', '.'],
     },
   },
   build: {
     target: 'es2021',
+    // Use esbuild for CSS minification instead of lightningcss — the vendored
+    // AMLL core CSS uses CSS nesting (`&`) that lightningcss can't handle.
+    cssMinify: 'esbuild',
   },
 })

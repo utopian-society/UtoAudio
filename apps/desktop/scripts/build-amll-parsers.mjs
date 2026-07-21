@@ -1,25 +1,34 @@
 #!/usr/bin/env node
-// Pre-builds the AMLL submodule's lyric + ttml parsers into self-contained
-// ESM `.mjs` files with sibling `.d.mts` type declarations.
+// Pre-builds the AMLL submodule's lyric + ttml parsers and the core DOM
+// lyric player into self-contained ESM `.mjs` files with sibling `.d.mts`
+// type declarations.
 //
 // Why: the upstream submodule is a pnpm workspace monorepo that needs its
 // own toolchain (tsdown + Nx) to build, which can't run in this project's
-// environment. The parser entry points used here (`lyric/src/formats/*` and
-// `ttml/src/index`) have no external npm dependencies, so we bundle them
-// directly with esbuild and consume the output via path imports.
+// environment. The entry points used here have no external npm dependencies
+// (except `@ungap/structured-clone` for the core player, resolved from our
+// own `node_modules`), so we bundle them directly with esbuild and consume
+// the output via path imports.
 
 import { build } from 'esbuild';
 import { writeFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const SUB = 'src/lib/vendor/amll/packages';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = resolve(__dirname, '..');
+
+const SUB = `${PROJECT_ROOT}/src/lib/vendor/amll/packages`;
 const LRC = `${SUB}/lyric/src/formats/lrc.ts`;
 const YRC = `${SUB}/lyric/src/formats/yrc.ts`;
 const QRC = `${SUB}/lyric/src/formats/qrc.ts`;
 const UTILS = `${SUB}/lyric/src/utils.ts`;
 const TTML = `${SUB}/ttml/src/index.ts`;
+const CORE_LYRIC_PLAYER = `${SUB}/core/src/lyric-player/index.ts`;
 
 const DIST_LYRIC = `${SUB}/lyric/dist`;
 const DIST_TTML = `${SUB}/ttml/dist`;
+const DIST_CORE = `${SUB}/core/dist`;
 
 const entries = [
 	{ in: LRC, out: `${DIST_LYRIC}/formats-lrc.mjs` },
@@ -39,6 +48,23 @@ for (const { in: entry, out: outfile } of entries) {
 		logLevel: 'info',
 	});
 }
+
+// ── Core DOM lyric player ────────────────────────────────────────────────
+// The core package uses Node.js subpath imports (`#interfaces`, `#utils/*`,
+// `#styles/*`, `#lyric/*`) declared in its `package.json` `imports` field.
+// esbuild reads these automatically when the working directory is set to the
+// core package. CSS modules (`.module.css`) and side-effect CSS imports
+// (`import "#styles/index.css"`) are handled natively by esbuild — the CSS
+// is extracted to a sibling `.css` file alongside the `.mjs` output.
+await build({
+	entryPoints: [CORE_LYRIC_PLAYER],
+	bundle: true,
+	format: 'esm',
+	target: 'es2021',
+	outfile: `${DIST_CORE}/lyric-player.mjs`,
+	absWorkingDir: `${SUB}/core`,
+	logLevel: 'info',
+});
 
 // Type declarations (sibling .d.mts files — TypeScript picks these up
 // automatically for the .mjs imports).
@@ -108,5 +134,51 @@ export interface AmllLyricResult {
 export function parseTTML(content: string): AmllLyricResult;
 export function exportTTML(lyric: AmllLyricResult): string;`;
 writeFileSync(`${DIST_TTML}/index.d.mts`, ttmlDts);
+
+// Core DOM lyric player type declarations (minimal — we only use DomLyricPlayer).
+const coreDts = `export interface AmllLyricWord {
+	startTime: number;
+	endTime: number;
+	word: string;
+	romanWord?: string;
+	obscene?: boolean;
+	emptyBeat?: number;
+	ruby?: AmllLyricWord[];
+}
+export interface AmllLyricLine {
+	words: AmllLyricWord[];
+	translatedLyric: string;
+	romanLyric: string;
+	isBG: boolean;
+	isDuet: boolean;
+	startTime: number;
+	endTime: number;
+}
+export class DomLyricPlayer {
+	constructor(element?: HTMLElement);
+	setLyricLines(lines: AmllLyricLine[], initialTime?: number): void;
+	setCurrentTime(time: number, isSeek?: boolean): void;
+	setWordFadeWidth(value?: number): void;
+	setEnableScale(enable?: boolean): void;
+	getEnableScale(): boolean;
+	setEnableBlur(enable?: boolean): void;
+	setHidePassedLines(hide?: boolean): void;
+	setEnableSpring(enable?: boolean): void;
+	getEnableSpring(): boolean;
+	setAlignPosition(pos?: number): void;
+	setAlignAnchor(anchor?: string): void;
+	setOverscanPx(px?: number): void;
+	getOverscanPx(): number;
+	setIsSeeking(seeking?: boolean): void;
+	setMaskObsceneWords(mode?: string): void;
+	setMaskObsceneWordChar(char?: string): void;
+	play(): void;
+	pause(): void;
+	getIsPlaying(): boolean;
+	update(delta?: number): void;
+	dispose(): void;
+	readonly element: HTMLElement;
+}`;
+writeFileSync(`${DIST_CORE}/lyric-player.d.mts`, coreDts);
 
 console.log('AMLL submodule parsers built.');

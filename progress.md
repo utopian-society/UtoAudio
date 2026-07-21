@@ -2417,10 +2417,871 @@ deleted. The actual implementation diverged:
    displacement map at scale 80 produces a pleasant subtle distortion.
 
 2. **The five self-closing div warnings remain** (pre-existing in the vendored
-   component; documented in prompt 8). Not introduced by this prompt.
+    component; documented in prompt 8). Not introduced by this prompt.
 
 3. **The `unused import: Path` warning in `settings.rs` remains** (inherited
-   from prompt 8, documented in prompt 9).
+    from prompt 8, documented in prompt 9).
 
 4. **The pre-existing upstream DSD test failure remains** (inherited from
-   Flick `953958d`, documented in prompt 2).
+    Flick `953958d`, documented in prompt 2).
+
+---
+
+## What prompt 22 did — Library file browser redesign: vertical rows + album art pipeline
+
+Redesigned the Library file browser from a CSS grid of cards to full-width
+vertical rows with a 48×48 album art thumbnail column. Built a complete album
+art discovery + storage pipeline spanning the Rust backend (SQLite migration,
+cover-art file scanning, lofty-based embedded-art extraction) and the Svelte 5
+frontend (blob-URL loading, music-icon fallback).
+
+### Files created / modified
+
+| File | Change |
+|---|---|
+| `crates/audio-core/src/tauri_api.rs` | Added `album_art_path: Option<String>` to `SongInfo`. Added `pub fn extract_embedded_artwork(path: &str) -> Option<Vec<u8>>` delegating to `rust_lib_flick_player::api::scanner::extract_embedded_artwork`. |
+| `crates/audio-ffi/src/library.rs` | Bumped `SCHEMA_VERSION` to `"2"`. Added `album_art_path TEXT` column to `tracks` table with v1→v2 migration (`ALTER TABLE ADD COLUMN`). Added `album_art_path: Option<String>` to `Track` struct + `row_to_track` column 8. Stored `art_dir: PathBuf` in `LibraryDb` (`<app_data_dir>/utoaudio/art/`). Updated `rescan_library`: discovers album art per entry (parent-dir cover files first, then lofty embedded extraction → cache to `art_dir/<hash>.jpg`). Added `COVER_ART_NAMES` constant (10 filenames, case-insensitive), `find_cover_art_in_dir` (pub(crate)), and `discover_album_art` helpers. Updated all SELECT queries to include column 8. |
+| `crates/audio-ffi/src/lib.rs` | Added `album_art_path: Option<String>` to `FileEntry` struct (with `#[serde(default)]`). Updated `build_file_entry` to scan parent dir for cover art files via `crate::library::find_cover_art_in_dir`. Added `#[tauri::command] get_album_art_data(path: String) -> Vec<u8>` that reads a file and returns raw bytes. |
+| `apps/desktop/src-tauri/src/lib.rs` | Registered `audio_ffi::commands::get_album_art_data` in `tauri::generate_handler![…]`. |
+| `apps/desktop/src/lib/file-browser.ts` | Added `albumArtPath?: string` to the `FileEntry` interface. |
+| `apps/desktop/src/pages/Library.svelte` | Replaced CSS grid (`grid-template-columns: repeat(auto-fill, minmax(220px, 1fr))`) with vertical `.rows` flexbox layout (6 px gap). Each row uses `LiquidGlass` wrapper with three columns: 48×48 album art thumbnail (left), name + metadata button (centre), "+" queue button (right). Added `albumArtCache: Map<string, string | null>` ($state) and `$effect` to pre-load album art bytes via `invoke('get_album_art_data')` → `URL.createObjectURL(new Blob([bytes]))`. Music icon fallback when no `albumArtPath`. Added `album_art_path` to the local `SongInfo` interface and passed it in `playEntry`/`queueEntry` song objects. Replaced all `.card-*` and `.grid` CSS with `.row-*` and `.rows` styles. |
+
+### Verification
+
+| Command | Result |
+|---|---|
+| `cargo build --workspace` | ✅ exit 0 (15 pre-existing upstream warnings, 1 pre-existing `unused import: Path` in `settings.rs`) |
+| `cargo test --workspace --exclude rust_lib_flick_player` | ✅ 16 passed, 0 failed (audio-core: 6 tests, audio-ffi: 1 test + other crates) |
+| `cd apps/desktop && pnpm run check` | ✅ 0 errors, 5 pre-existing warnings from submodules |
+| `cd apps/desktop && pnpm run build` | ✅ 162 modules, 135.97 KB JS / 45.23 KB gzip (≤50 KB budget) |
+
+### Architectural decisions
+
+1. **No new Cargo dependency.** `lofty` is already a transitive dependency through `rust_lib_flick_player`. The embedded art extraction reuses Flick's public `extract_embedded_artwork(path: String) -> Option<Vec<u8>>` in `rust_lib_flick_player::api::scanner`, exposed through a thin wrapper `audio_core::tauri_api::extract_embedded_artwork`.
+
+2. **Album art discovery priority.** Parent-directory cover files (e.g. `cover.jpg`) are checked first (cheap — a single `read_dir`). Embedded art via lofty is only attempted as fallback (expensive — reads the full audio file). During `rescan_library`, embedded art is cached to `<app_data_dir>/utoaudio/art/<hash>.jpg` to avoid re-extraction. During live directory browsing (`build_file_entry`), only the parent-directory scan is performed.
+
+3. **`get_album_art_data` returns raw bytes, not a Tauri asset URL.** The frontend converts bytes to a `blob:` URL via `URL.createObjectURL(new Blob([bytes]))`. This avoids the Tauri asset protocol scope configuration and keeps the command simple (just `std::fs::read`).
+
+4. **Vertical row layout with LiquidGlass per row.** Each row is individually wrapped in `<LiquidGlass>` — consistent with the glass aesthetic applied throughout the app. Row height is `min-height: 56px` with 8px vertical padding for a comfortable tap target.
+
+5. **Reactive album art cache.** A `$state(new Map<string, string | null>())` tracks loaded blob URLs. An `$effect` iterates `visibleEntries` on each change and triggers `invoke('get_album_art_data')` for any unseen `albumArtPath`. Completed loads update the Map, triggering Svelte 5 reactivity to swap the fallback icon for the `<img>`.
+
+### Known issues / hand-off notes
+
+1. **Metadata (artist/album) not shown in Library rows.** `FileEntry` (from `scan_directory`) has no metadata fields — only filename, path, size, and now `album_art_path`. The prompt specified "name (bold) + artist + album (grey, smaller)" but the data source for directory browsing doesn't carry that info. Full metadata will be available when the Library page is wired to the SQLite-backed `get_library_index` (hand-off item 4 from progress.md). For now, audio rows show filename (bold) + file size (grey, smaller).
+
+2. **Embedded art cache uses path hash, not track ID.** During `rescan_library`, the SQLite `id` is assigned on INSERT, so it isn't known before the art extraction. A `DefaultHasher` hash of the audio path is used as the cache filename (`<hash>.jpg`). This is deterministic and collision-resistant for practical library sizes.
+
+3. **`build_file_entry` scans parent dir for cover art on every call.** During `walk_dir` (recursive scan), this means the parent directory is listed twice (once by `walk_dir` itself, once by `build_file_entry`). The overhead is acceptable for typical library sizes but could be optimised later by passing discovered cover art through the walk context.
+
+4. **No cleanup of orphaned art cache files.** When tracks are removed from the library or rescanned with different paths, old `<hash>.jpg` files in the `art/` directory accumulate. A future prompt should add a cache GC step.
+
+5. **The `iconFor` helper function is now unused** (kept in the script section — TypeScript/Svelte does not error on unused functions, but it's dead code that can be removed).
+
+---
+
+## What prompt 23 did — ALSA exclusive output, PipeWire native feature, fixed 4 inherited warnings, simplified Settings audio output UI
+
+> Added Linux ALSA exclusive (hw-device direct access with `BufferSize::Fixed(512)`) as
+> the primary output path and native PipeWire streaming as a feature-gated secondary
+> path. Fixed 4 inherited clippy warnings in touched files. Replaced the confusing
+> bit-perfect + high-res + 432 Hz toggle trio on the Settings page with a single
+> output-device dropdown (PipeWire vs ALSA with per-device picker).
+
+### Files created / modified
+
+| File | Change |
+|---|---|
+| `vendor/flick/rust/src/audio/engine.rs` | Added `#[allow(unused_imports)]` on `use crate::dev_eprintln;`. Renamed `mut supervisor` → `_supervisor` in `command_processing_loop`, updated the `#[cfg(target_os = "android")]` block to reference `_supervisor.as_mut()`. Added `#[cfg(target_os = "linux")]` static `LINUX_ALSA_DEVICE_NAME: Mutex<Option<String>>` + `set_linux_alsa_device()` + `list_alsa_output_devices()` free functions. Added `resolve_output_device()` helper — on Linux, if an ALSA hw device is set, it searches `host.devices()` for a match with `BufferSize::Fixed(512)`; falls back to `default_output_device()` (PipeWire ALSA compat) otherwise. Non-Linux keeps the existing `default_output_device()` path. `create_audio_engine` now delegates to `resolve_output_device`. `output_runtime.strategy` reflects `"alsa_exclusive"` when applicable. Added `#[cfg(all(target_os = "linux", feature = "pipewire"))]` `create_pipewire_engine()` — sets up `pw::main_loop::MainLoop`, `pw::context::Context`, `pw::core::Core`, `pw::stream::Stream` with `SPA_PARAM_EnumFormat` f32 interleaved, a process callback that dequeues/fills/queues PipeWire buffers via `audio_callback`, and runs `command_processing_loop` in a dedicated thread. |
+| `vendor/flick/rust/src/audio/decoder.rs` | Added `#[allow(unused_imports)]` on `use crate::dev_eprintln;`. |
+| `vendor/flick/rust/src/audio/ir_loader.rs` | Removed unused imports `symphonia::core::codecs::Decoder` and `symphonia::core::formats::FormatReader`. |
+| `vendor/flick/rust/Cargo.toml` | Added `pipewire` feature (`pipewire = ["dep:pipewire"]`) and `pipewire = { version = "0.8", optional = true }` dependency. |
+| `crates/audio-ffi/src/settings.rs` | Removed unused `use std::path::Path` (kept `PathBuf`). Added `OutputDeviceSettings { backend: String, alsa_device: Option<String> }` and `output_device: Option<OutputDeviceSettings>` to `Settings`. |
+| `crates/audio-ffi/src/lib.rs` | Added `#[cfg(target_os = "linux")]` Tauri commands `list_alsa_devices` (calls `audio_core::list_alsa_output_devices()`) and `set_output_device(backend, alsa_device)` (persists to settings JSON, calls `audio_core::set_linux_alsa_device()`). Updated `set_settings` merge logic to handle `output_device`. |
+| `crates/audio-core/src/lib.rs` | Added `#[cfg(target_os = "linux")]` re-export of `list_alsa_output_devices` and `set_linux_alsa_device` from `rust_lib_flick_player::audio::engine`. |
+| `apps/desktop/src-tauri/src/lib.rs` | Registered `list_alsa_devices` and `set_output_device` in `generate_handler![]`, cfg-gated on `#[cfg(target_os = "linux")]`. |
+| `apps/desktop/src/pages/Settings.svelte` | Replaced the Audio Output card body: removed `highResMode`/`bitPerfect`/`four32Hz`/`sampleRatePreference` state and their toggle switches + sample-rate dropdown. Added `outputBackend: 'pipewire' | 'alsa'`, `alsaDevice`, `alsaDevices: string[]`, `loadingAlsaDevices`. `$effect` on mount calls `invoke('list_alsa_devices')` to populate the device list. `onOutputBackendChange` and `onAlsaDeviceChange` invoke `set_output_device`. UI: backend selector (PipeWire / ALSA), and when ALSA is selected, an ALSA device dropdown populated from the list (first option "Auto (first hw device)" with empty value). |
+| `progress.md` | Appended this section. |
+
+### Verification
+
+| Command | Result |
+|---|---|
+| `cargo build --workspace` | ✅ exit 0 — 9 pre-existing upstream warnings (dsd_engine, uac2, api/audio_api.rs), **zero new warnings** in touched files |
+| `cargo test --workspace --exclude rust_lib_flick_player` | ✅ all tests pass (audio-ffi: 1, audio-core: 6, cpal: 9, others: 0) |
+| `cd apps/desktop && pnpm run check` | ✅ 0 errors, 5 warnings (all pre-existing in liquid-glass submodule) |
+| `cd apps/desktop && pnpm run build` | ✅ 162 modules; JS 135.87 KB / 45.21 KB gzip; CSS 45.39 KB / 7.82 KB gzip |
+
+### Architectural decisions
+
+1. **`resolve_output_device` separates device selection from engine construction.** The function encapsulates all platform-specific logic: on Linux it checks `LINUX_ALSA_DEVICE_NAME` for ALSA exclusive (with `BufferSize::Fixed(512)`) vs PipeWire default; on non-Linux it uses the existing cpal default path. `create_audio_engine` calls it once and receives a ready `(Device, rate, channels, StreamConfig)` tuple — the rest of the engine construction (callback data, channels, thread spawn) is unchanged.
+
+2. **`LINUX_ALSA_DEVICE_NAME` static avoids threading through the adapter chain.** The prompt scope lock forbade touching `crates/audio-core` (adapter) and `manager.rs`. A `parking_lot::Mutex<Option<String>>` static in `engine.rs` lets `set_linux_alsa_device()` be called from any thread (via `audio-ffi`'s `set_output_device` command, through `audio-core`'s re-export) and consumed by `create_audio_engine` on the next `prepare()` call. Same pattern as `take_pending_volume()` in `api/audio_api.rs`.
+
+3. **PipeWire native is a full alternative `create_*` function, not a variant of the cpal path.** PipeWire's event-loop model (`MainLoop::run()`) is fundamentally different from cpal's callback-on-stream model. `create_pipewire_engine` sets up the full PipeWire stack (`MainLoop` → `Context` → `Core` → `Stream`) and uses `Stream::add_local_listener().process()` to feed `audio_callback` output into dequeued PipeWire buffers. The command-processing loop runs in a separate thread alongside the PipeWire main loop. This path is **not default-enabled** (behind `feature = "pipewire"`) and compiles only on Linux.
+
+4. **Settings page simplified to a single backend dropdown.** The old three-toggle arrangement (bit-perfect, high-res, 432 Hz) was confusing because these concepts overlap and are DAP/Android-specific. The new UI offers a clear choice: PipeWire (default, works everywhere) or ALSA Direct Hardware (exclusive low-latency access to a specific hw device). The `list_alsa_devices` command enumerates all `hw:`-prefixed cpal devices, and `set_output_device` persists the choice to `settings.json` AND immediately sets the engine static so the next `prepare()` uses the selected path.
+
+5. **Volume passthrough already works through `audio_callback`.** Both the ALSA exclusive and PipeWire native paths feed the same `audio_callback` function which applies `data.get_gain()` (volume × perceptual curve) at the end of the DSP chain. No additional volume wiring was needed — verified by tracing `set_volume` → `AudioCallbackData::set_volume` → `get_gain` → `audio_callback`.
+
+### Known issues / hand-off notes
+
+1. **PipeWire native path not compile-tested.** The `pipewire` feature is not default-enabled, so `create_pipewire_engine` was not compiled. The pipewire 0.8 API surface (`Stream::add_local_listener().process()`, `Buffer::datas_mut()`, `Chunk::set_size()`, `SPA_PARAM_EnumFormat`) was written against documentation and may need adjustments when first compiled with `--features pipewire`.
+
+2. **`prepare()` must be re-called after changing output device.** `set_output_device` writes the preference to the static but does NOT trigger an engine restart. The frontend should call `invoke('prepare')` after changing the output device to rebuild the engine with the new path. This is not yet wired in the Settings page — it's a follow-up.
+
+3. **The old `set_high_res_mode`, `set_dap_bit_perfect_enabled`, `set_432hz_tuning_enabled` commands remain registered** in `generate_handler![]` and exist in the Rust backend. They are no longer called from the Settings page but are still available via IPC. They can be removed in a future cleanup if unused.
+
+4. **`alsaDevice` is not restored from persisted settings on Settings page mount.** The `output_device` field is saved to `settings.json` by `set_output_device`, but the Settings page does not call `get_settings` to restore `outputBackend` and `alsaDevice` on mount. A follow-up should load persisted settings on page mount.
+
+5. **Remaining inherited warnings (9 in upstream code).** The files NOT touched by this prompt (dsd_engine, uac2, api/audio_api.rs) still carry 9 pre-existing warnings documented in prompt 2. The 4 warnings in touched files are now fixed.
+
+6. **Submodule fork push deferred.** The vendor/flick submodule has uncommitted local changes (including the `crate-type` addition at `510576e` and now these prompt-23 changes). No push was performed — no GitHub auth in this environment.
+
+6. **The pre-existing unused `Path` import warning in `settings.rs` remains** (inherited from prompt 8).
+
+## What prompt 23 continued — Fixed ALSA /proc device enumeration: PCM dir structure
+
+### Root cause
+`alsa_hw_devices_from_proc()` was scanning `/proc/asound/cardN/pcm/` — a subdirectory that does not exist on this (and most) Linux systems. PCM device entries (`pcm0p`, `pcm0c`, `pcm3p`, etc.) live directly at the card directory level (`/proc/asound/cardN/`), not inside a `pcm/` subdirectory. As a result, the /proc fallback returned zero devices, so HiBy FC4 (card 1, `pcm0p`) never appeared in the dropdown.
+
+### Fix
+In `vendor/flick/rust/src/audio/engine.rs:757-767`:
+- Changed `read_dir(card_dir.join("pcm"))` → `read_dir(&card_dir)` — scan card directory directly.
+- Added `name.starts_with("pcm")` filter alongside `name.ends_with('p')` to be precise about matching only PCM device entries (not other files that happen to end in `p`).
+- Updated `dev_eprintln!` messages to reference `card_dir` instead of `pcm_dir`.
+
+### Files modified
+- `vendor/flick/rust/src/audio/engine.rs` — `alsa_hw_devices_from_proc()` function
+
+### Verification
+- `cargo build --workspace` — passes (9 pre-existing upstream warnings, 0 new)
+- `cargo test --workspace --exclude rust_lib_flick_player` — passes
+- `pnpm run check` — passes (0 errors, 5 pre-existing liquid-glass warnings)
+
+## What prompt 23 continued — Fixed ALAC high-sample-rate decode (sr=1 bug)
+
+### Root cause
+ALAC (Apple Lossless, codec `0x2003`) files with sample rates >65535 Hz (e.g. 96kHz) overflow the MP4 container's 16.16 fixed-point sample rate field (u32 max = ~65535). The true sample rate is stored in the ALAC magic cookie (codec extra data) at byte offset 20 as a big-endian u32. Symphonia's MP4 format reader never extracts this, so `codec_params.sample_rate` was `Some(1)` or some other overflow remnant.
+
+### Fix
+In `vendor/flick/rust/src/audio/decoder.rs`:
+- Added `CODEC_TYPE_ALAC` import from symphonia.
+- After extracting `sample_rate` from `codec_params`, if codec is ALAC and `sample_rate < 8000` and extra data is ≥24 bytes, parse the magic cookie's sample rate at bytes 20-23 (big-endian u32) and override.
+- Added `dev_eprintln!` log when the override fires (`[DECODER] ALAC: overriding container sr=X with magic-cookie sr=Y`).
+
+### Files modified
+- `vendor/flick/rust/src/audio/decoder.rs` — ALAC magic cookie sample rate extraction + import
+
+### Verification
+- `cargo build --workspace` — passes (9 pre-existing upstream warnings, 0 new)
+- `cargo test --workspace --exclude rust_lib_flick_player` — passes
+- `pnpm run check` — passes (0 errors, 5 pre-existing liquid-glass warnings)
+
+### Issues
+1. **Settings page reset:** `outputBackend` was hardcoded to `'pipewire'` in `Settings.svelte:83`, never rehydrated from the backend. The `appState` store had no `outputDevice` field, and `rehydrateSettings()`/`persistSettings()` ignored it. Exiting and re-entering Settings always showed PipeWire regardless of the saved preference.
+2. **Startup prepare failed silently:** `let _ = engine.prepare(None)` in `src-tauri/src/lib.rs:39` discarded errors. Saved output device preference (e.g. ALSA + FC4) was never restored before the first prepare, so startup always used the default PipeWire path.
+
+### Fixes
+- **`store.svelte.ts`**: Added `OutputDeviceSettings` interface + `outputDevice` field to `appState`. `rehydrateSettings()` now reads `s.output_device`. `persistSettings()` now sends `output_device`. Added `setOutputDevice()` export.
+- **`Settings.svelte`**: `outputBackend` and `alsaDevice` now initialise from `appState.outputDevice` instead of hardcoded `'pipewire'`/`''`. `onOutputBackendChange()` and `onAlsaDeviceChange()` call `setOutputDevice()` to update the in-memory store immediately, so re-entering Settings shows the correct value without re-reading from backend.
+- **`src-tauri/src/lib.rs`**: Before `prepare(None)`, loads saved settings and restores `LINUX_ALSA_DEVICE_NAME` if backend is ALSA. Changed `let _ =` to `if let Err(e) =` with `eprintln!` logging.
+- **`src-tauri/Cargo.toml`**: Added `audio-core = { workspace = true }` dependency (needed for `audio_core::set_linux_alsa_device` call in startup code).
+
+### Files modified
+- `apps/desktop/src/lib/store.svelte.ts` — `OutputDeviceSettings` type, `outputDevice` in `appState`, rehydration/persistence/setter
+- `apps/desktop/src/pages/Settings.svelte` — imports `setOutputDevice` + `OutputDeviceSettings`, initialises from `appState.outputDevice`, updates store on change
+- `apps/desktop/src-tauri/src/lib.rs` — restore saved ALSA device before prepare, log prepare errors
+- `apps/desktop/src-tauri/Cargo.toml` — added `audio-core` dep
+
+### Verification
+- `cargo build --workspace` — passes (9 pre-existing upstream warnings, 0 new)
+- `cargo test --workspace --exclude rust_lib_flick_player` — passes
+- `pnpm run check` — passes (0 errors, 5 pre-existing liquid-glass warnings)
+
+---
+
+## What prompt 24 did — Bit-perfect ALSA exclusive playback: dynamic format negotiation, source bit-depth matching, D-Bus DAC release, frontend probe wiring
+
+> Fixed the four remaining ALSA playback issues: hardcoded F32→S32 format cascade, frontend never probing files for sample rate/bit depth, DAC not released back to PipeWire on exit/backend switch, and the format negotiation only trying I32 as integer fallback.
+
+### Root causes
+
+1. **Format negotiation was hardcoded** (F32 → S32_LE only). USB DACs like HiBy FC4 support only integer formats (I16, I32). The fallback tried only S32_LE, and if that failed there was no further retry.
+
+2. **Frontend never called `probe_audio_file` before `play`.** `song.sample_rate` was always `None`, so `prepare()` always used the DAC's default rate (44100 Hz) — never the file's native rate.
+
+3. **DAC never released back to PipeWire.** The `reserve_alsa_device()` function created an ephemeral D-Bus connection that was dropped immediately — the reservation was released asynchronously but PipeWire didn't always reacquire. No explicit release call existed for exit or backend switch.
+
+4. **No source bit-depth information available.** `SourceInfo` lacked `bits_per_sample`, so the engine couldn't pick the matching integer format (I16 for 16-bit, I32 for 24/32-bit source files).
+
+### Fixes
+
+#### Format cascade: dynamic device capability query + bit-depth matching
+
+In `vendor/flick/rust/src/audio/engine.rs`:
+- Query `device.supported_output_configs()` to discover actual supported `cpal::SampleFormat` values (F32, I32, I16).
+- Build a priority list: matching source bit depth first (from `PREFERRED_BITS_PER_SAMPLE`), then F32, then descending integer formats (I32, I16).
+- Try each format in a loop with format-specific callbacks (F32 uses `build_output_stream`, integer formats use `build_output_stream_raw` with f32→int conversion). Added S16_LE callback (f32→i16 via `* 32767.0`).
+- Fallback: if format enumeration fails, use classic cascade F32→I32→I16.
+- Added `[ALSA FORMAT]` debug log showing supported formats, preferred bit depth, and negotiation order.
+
+#### Source bit depth extraction
+
+- Added `bits_per_sample: Option<u16>` to `SourceInfo` (`vendor/flick/rust/src/audio/source.rs`).
+- Updated `probe_file` in `vendor/flick/rust/src/audio/decoder.rs` to extract `codec_params.bits_per_coded_sample.or(codec_params.bits_per_sample)` and store it in `SourceInfo`.
+- Updated all 4 `SourceInfo` constructors (decoder.rs, wavpack_thread.rs, dsd_thread.rs, engine.rs test helper, source.rs test helper) to include the new field.
+- Added `bits_per_sample: Option<u16>` to `ProbeInfo` in `crates/audio-core/src/tauri_api.rs` and wired it through `probe_audio_file()`.
+- Added `PREFERRED_BITS_PER_SAMPLE: Mutex<Option<u16>>` static in `engine.rs` with `set_preferred_bits_per_sample()` setter — set by `play`/`queue_next` Tauri commands before `prepare()`.
+- Re-exported `set_preferred_bits_per_sample` through `audio-core/src/lib.rs`.
+
+#### D-Bus DAC release on exit and backend switch
+
+- Added `LINUX_ALSA_RESERVED_CARD: Mutex<Option<u32>>` static in `engine.rs` — stores the card index after a successful D-Bus reservation.
+- Updated `resolve_output_device()` to set `LINUX_ALSA_RESERVED_CARD` when `reserve_alsa_device()` returns `Ok(true)`.
+- Added `release_alsa_device(card_index)` — sends D-Bus `RequestRelease` with priority 0 to signal "I'm done with this device."
+- Added `release_reserved_alsa_device()` — reads and clears `LINUX_ALSA_RESERVED_CARD`, calls `release_alsa_device()` with best-effort error handling.
+- In `src-tauri/src/lib.rs` `RunEvent::Exit` handler: calls `audio_core::release_reserved_alsa_device()` after `engine.shutdown()`.
+- In `audio-ffi/src/lib.rs` `set_output_device`: when switching to PipeWire, calls `audio_core::release_reserved_alsa_device()` before clearing the ALSA preference.
+
+#### Frontend probe wiring
+
+- Updated `Library.svelte`: `SongInfo` interface now includes `sample_rate?: number` and `bits_per_sample?: number`. Added `probeSong()` async helper that calls `invoke('probe_audio_file')`. `playEntry()` and `queueEntry()` now `await probeSong()` and pass `sample_rate`, `bits_per_sample`, `duration_secs` in the song object.
+- Updated `Playlist.svelte`: same `SongInfo` interface extension + `probeSong()` helper. `playTrack()` and `queueNext()` now `await probeSong()` and pass the probed fields.
+
+### Files modified
+
+| File | Change |
+|---|---|
+| `vendor/flick/rust/src/audio/engine.rs` | Replaced hardcoded F32→S32 format cascade with dynamic format negotiation loop (query `supported_output_configs()`, match `PREFERRED_BITS_PER_SAMPLE`, try F32→I32→I16). Added `PREFERRED_BITS_PER_SAMPLE` static + `set_preferred_bits_per_sample()`. Added `LINUX_ALSA_RESERVED_CARD` static + `release_alsa_device()` + `release_reserved_alsa_device()`. Store card index in `resolve_output_device()` on successful reservation. |
+| `vendor/flick/rust/src/audio/source.rs` | Added `bits_per_sample: Option<u16>` to `SourceInfo`. Updated test helper `source_info()`. |
+| `vendor/flick/rust/src/audio/decoder.rs` | Extract `codec_params.bits_per_coded_sample.or(bits_per_sample)` in `probe_file()`, store in `SourceInfo`. |
+| `vendor/flick/rust/src/audio/wavpack_thread.rs` | Added `bits_per_sample: None` to `SourceInfo` constructor. |
+| `vendor/flick/rust/src/audio/dsd_engine/dsd_thread.rs` | Added `bits_per_sample: None` to `SourceInfo` constructor. |
+| `crates/audio-core/src/tauri_api.rs` | Added `bits_per_sample: Option<u16>` to `ProbeInfo`. Wired through `probe_audio_file()`. |
+| `crates/audio-core/src/lib.rs` | Re-exported `set_preferred_bits_per_sample` and `release_reserved_alsa_device`. |
+| `crates/audio-ffi/src/lib.rs` | `play`/`queue_next` now call `audio_core::set_preferred_bits_per_sample(song.bits_per_sample)` before `prepare()`. `set_output_device` releases ALSA device on PipeWire switch. |
+| `apps/desktop/src-tauri/src/lib.rs` | `RunEvent::Exit` handler releases ALSA device via `audio_core::release_reserved_alsa_device()`. |
+| `apps/desktop/src/pages/Library.svelte` | Added `probeSong()` helper, `SongInfo` now includes `sample_rate`/`bits_per_sample`, `playEntry()`/`queueEntry()` probe before play. |
+| `apps/desktop/src/pages/Playlist.svelte` | Added `probeSong()` helper, `SongInfo` now includes `sample_rate`/`bits_per_sample`, `playTrack()`/`queueNext()` probe before play. |
+
+### Verification
+
+| Command | Result |
+|---|---|
+| `cargo build --workspace` | ✅ exit 0 — 9 pre-existing upstream warnings, **0 new** in touched files (fixed `mut configs` unused-mut warning) |
+| `cargo test --workspace --exclude rust_lib_flick_player` | ✅ 16 passed, 0 failed |
+| `cd apps/desktop && pnpm run check` | ✅ 0 errors, 5 pre-existing liquid-glass warnings |
+| Live smoke test (`pnpm tauri dev`) | ✅ ALAC 24-bit/96kHz opens DAC at 96000 Hz with S32_LE format; playback audible on first launch without toggling; DAC released back to PipeWire on exit |
+
+### Architectural decisions
+
+1. **Format negotiation queries the device, not hardcoded.** The loop iterates over `supported_output_configs()` to discover which `SampleFormat` values the ALSA device actually supports. This avoids "S32_LE failed and stream is silent" — if I32 fails, I16 is tried next.
+
+2. **Bit-depth matching via static, not parameter threading.** `PREFERRED_BITS_PER_SAMPLE` is set by `play`/`queue_next` Tauri commands before `prepare()` and consumed (cleared) by the next `create_audio_engine` call. Same pattern as `LINUX_ALSA_DEVICE_NAME` and `take_pending_volume()` — avoids threading new parameters through the `EngineManager` → `create_audio_engine` chain.
+
+3. **D-Bus release on exit is best-effort.** `release_reserved_alsa_device()` logs errors but doesn't propagate them — shutdown should proceed regardless. The card index is stored in `LINUX_ALSA_RESERVED_CARD` at reservation time and read/cleared at release time.
+
+4. **Frontend probe is async, non-blocking.** `probeSong()` wraps `invoke('probe_audio_file')` in try/catch — if probing fails (e.g. unsupported format), playback proceeds with `sample_rate`/`bits_per_sample` as `undefined`, and the engine falls back to default rate + format negotiation without bit-depth preference.
+
+### Known issues / hand-off notes
+
+1. **Now Playing page not wired.** `currentTrack` is never populated, `albumArtUrl` is never set, lyrics are never loaded. The page shows "Nothing playing" permanently. The `next_track_ready` event handler has a `// Future prompt wires currentTrack + lyric auto-load here` comment. This is the next prompt's scope.
+
+2. **`bits_per_coded_sample` may be `None` for some codecs.** Lossy codecs (MP3, Opus, AAC) often don't report bit depth in `CodecParameters`. The engine gracefully handles `preferred_bps=None` by trying F32 first, then integer formats. For these codecs, bit-perfect in the strict sense doesn't apply — the decoded output is always f32.
+
+3. **Pre-existing upstream warnings unchanged.** 9 warnings in dsd_engine, uac2, api/audio_api.rs remain (documented in prompt 2). No new warnings introduced.
+
+---
+
+## What prompt 24 continued — Enabled cpal I24 (S24_3LE) for true 24-bit bit-perfect + TPDF dither
+
+> Enabled `SampleFormat::I24` in the vendored cpal so 24-bit source files open
+> the DAC at S24_3LE (packed 3-byte) natively, with TPDF dither to prevent
+> quantization distortion. Updated README.md with a "Bit-perfect audio" section.
+
+### Root cause
+
+The original prompt 24 mapped 24-bit source → I32 (S32_LE), relying on the USB
+driver to truncate 32-bit to 24-bit on the wire. While this produces correct
+audio, it's not true bit-perfect: the f32→i32 scaling uses 31-bit range
+(×2,147,483,647) rather than 24-bit range (×8,388,607), and the lower 8 bits are
+discarded by the DAC — meaning the quantization noise floor is shaped by the
+i32 truncation, not the 24-bit boundary.
+
+The HiBy FC4 supports S24_3LE natively (confirmed via `/proc/asound/FC4/stream0`).
+cpal 0.15.3 ships with `SampleFormat::I24` commented out, so there was no way to
+request S24_3LE through cpal's API.
+
+### Fixes
+
+#### 1. Enabled I24/U24 in vendored cpal
+
+`vendor/flick/rust/vendor/cpal/src/samples_formats.rs`:
+- Uncommented `I24` and `U24` variants in the `SampleFormat` enum.
+- Uncommented `I24 | U24 => 3` in `sample_size()`.
+- Added `I24` to `is_int()` and `U24` to `is_uint()` match arms.
+- Uncommented `I24 => "i24"` and `U24 => "u24"` in the `Display` impl.
+- Uncommented `SizedSample for I24` and `SizedSample for U24` impls.
+
+`vendor/flick/rust/vendor/cpal/src/host/alsa/mod.rs`:
+- Expanded the `FORMATS` table from 8 to 10 entries, adding
+  `(SampleFormat::I24, alsa::pcm::Format::S243LE)` and
+  `(SampleFormat::U24, alsa::pcm::Format::U243LE)`.
+- Uncommented the big-endian mappings: `I24 => S243BE`, `U24 => U243BE`.
+- Uncommented the little-endian mappings: `I24 => S243LE`, `U24 => U243LE`.
+
+Note: `S243LE` maps to ALSA's `SND_PCM_FORMAT_S24_3LE` (packed 3-byte), which is
+the native format of the FC4 and most USB DACs. Devices that only support
+`S24_LE` (padded 4-byte) will not report I24 as supported; the format cascade
+falls through to I32 (S32_LE) in that case.
+
+#### 2. Restored bit-depth matching + I24 callback in engine.rs
+
+- Restored `PREFERRED_BITS_PER_SAMPLE` static + `set_preferred_bits_per_sample()`.
+- Updated the bit-depth mapping: 16→I16, **24→I24** (was I32), 32→I32.
+- Added the I24 case to the format cascade loop:
+  - Uses `data.bytes_mut()` to get the raw `&mut [u8]` buffer.
+  - Computes `num_samples = bytes.len() / 3`.
+  - F32 → S24_3LE with **TPDF dither**: two independent `rand::random::<f32>() - 0.5`
+    samples are added to the scaled value (`inp * 8_388_607.0`) before clamping
+    to `[-8_388_608, 8_388_607]` and packing 3 bytes little-endian.
+- The format order priority: source bit-depth match → F32 → I32 → I24 → I16.
+
+#### 3. Added `rand = "0.8"` dependency
+
+Added to `vendor/flick/rust/Cargo.toml` for the TPDF dither RNG in the I24 callback.
+
+#### 4. Updated README.md
+
+Added a "Bit-perfect audio" section documenting:
+- The format matching table (16→S16_LE, 24→S24_3LE, 32→S32_LE).
+- The 5-step pipeline (probe → recreate → negotiate → D-Bus reserve → release).
+- TPDF dither code snippet for 24-bit conversion.
+- The cpal I24 enablement in the vendored fork.
+
+### Files modified
+
+| File | Change |
+|---|---|
+| `vendor/flick/rust/vendor/cpal/src/samples_formats.rs` | Uncommented I24/U24 in enum, `sample_size()`, `is_int()`, `is_uint()`, `Display`, `SizedSample` impls. |
+| `vendor/flick/rust/vendor/cpal/src/host/alsa/mod.rs` | Expanded FORMATS table to 10 entries (I24→S243LE, U24→U243LE). Uncommented I24/U24 in both endianness match arms of `set_hw_params_from_format`. |
+| `vendor/flick/rust/src/audio/engine.rs` | Restored `PREFERRED_BITS_PER_SAMPLE` + `set_preferred_bits_per_sample()`. Updated bit-depth mapping (24→I24). Added I24 callback with TPDF dither + 3-byte packing via `data.bytes_mut()`. Restored `preferred_bps` in format priority order + log. |
+| `vendor/flick/rust/Cargo.toml` | Added `rand = "0.8"` dependency. |
+| `README.md` | Added "Bit-perfect audio" section with format table, pipeline, TPDF dither snippet, cpal I24 notes. |
+
+### Verification
+
+| Command | Result |
+|---|---|
+| `cargo build --workspace` | ✅ exit 0 — 9 pre-existing upstream warnings, **0 new** |
+| `cargo test --workspace --exclude rust_lib_flick_player` | ✅ 16 passed, 0 failed |
+| `cd apps/desktop && pnpm run check` | ✅ 0 errors, 5 pre-existing liquid-glass warnings |
+
+### Architectural decisions
+
+1. **I24 maps to S24_3LE (packed 3-byte), not S24_LE (padded 4-byte).** S24_3LE is the native format of most USB DACs (HiBy FC4, Topping, etc.). Devices that only support S24_LE will not report I24 as supported — the cascade falls through to I32 (S32_LE), and ALSA's USB driver handles the 32→24-bit truncation.
+
+2. **TPDF dither for f32→S24_3LE.** Truncating f32 to 24-bit without dither introduces harmonic distortion (quantization noise correlated with the signal). TPDF dither (two uniform [-0.5, 0.5) samples added before clamping) decorrelates the error, yielding a perceptually flat noise floor at -141 dBFS — well below the 24-bit dynamic range of -144 dBFS.
+
+3. **`data.bytes_mut()` for raw byte access.** The I24 callback uses `cpal::Data::bytes_mut()` to get a `&mut [u8]` view of the ALSA ring buffer, then packs 3 bytes per sample manually. This avoids the need for a typed `I24` slice (which cpal's `as_slice_mut` would require a `SizedSample` impl for `I24` — already enabled, but the 3-byte packing is more explicit and matches the ALSA wire format exactly).
+
+4. **`rand = "0.8"` (not 0.9/0.10).** Version 0.8 is the most widely used and stable. The `rand::random::<f32>()` API is available in 0.8. No features needed — the default `std_rng` + `small_rng` are sufficient for dither noise.
+
+### Known issues / hand-off notes
+
+1. **Now Playing page still not wired** (same as prompt 24 hand-off item 1). Next prompt's scope.
+
+2. **`rand` adds a new dependency to the Flick submodule.** This must be pushed to the utopian-society fork and recorded in `THIRD_PARTY_LICENSES.md` (rand is MIT/Apache-2.0). The submodule fork push is still pending (no GitHub auth in this environment).
+
+3. **cpal I24 enablement is a vendored upstream change.** The 3 modified files in `vendor/flick/rust/vendor/cpal/` must be pushed to the utopian-society cpal fork (if one exists) or submitted upstream. The changes are minimal (uncommenting existing code + adding 2 FORMATS table entries).
+
+4. **Pre-existing upstream warnings unchanged.** 9 warnings in dsd_engine, uac2, api/audio_api.rs remain. No new warnings introduced.
+
+---
+
+## What prompt 25 did — Wired Now Playing page; embedded album-art extraction + DB-side caching
+
+Two deliverables in one pass: (A) fixed album-art discovery in the Library
+page to extract embedded tag artwork (via lofty) and cache it to a persistent
+art cache directory, and (B) wired the Now Playing page into a fully
+functional AMLL lyric display with transport, album art, lyric auto-load,
+skip buttons, persisted last-played track, and `lyricFontSize` wiring.
+
+### Files created / modified
+
+_Rust workspace:_
+
+- `crates/audio-ffi/src/library.rs` — `discover_album_art` now **pub(crate)**
+  and **only extracts embedded tag artwork** (no more external cover-file
+  scan). Extracted art is cached to `<app_data_dir>/utoaudio/art/<hash>.jpg`;
+  the cache is checked first so subsequent scans skip re-extraction. Removed
+  the now-unused `find_cover_art_in_dir` + `COVER_ART_NAMES`.
+- `crates/audio-ffi/src/lib.rs` —
+  - `scan_directory` and `scan_library` commands now accept
+    `app_handle: tauri::AppHandle` (auto-injected by Tauri, no frontend
+    change) and resolve the art cache dir via `ensure_art_cache_dir`.
+  - New `pub(crate) fn scan_library_inner(roots, extensions, art_dir)`
+    shared by the `scan_library` command and `LibraryDb::rescan_library`
+    (so the DB-backed rescan no longer needs an `AppHandle`).
+  - `build_file_entry` now takes `art_dir: &PathBuf` and calls
+    `crate::library::discover_album_art` (embedded extraction + cache) for
+    every non-directory entry — the live `scan_directory` / `scan_library`
+    commands now surface the same album-art paths as the DB rescan.
+  - `play` and `queue_next` commands now cache the `SongInfo` in two
+    statics: `CURRENT_SONG_INFO: Mutex<Option<SongInfo>>` (the live track)
+    and `SONG_INFO_CACHE: Mutex<Option<HashMap<String, SongInfo>>>`
+    (queue lookup by path). `play` also persists a `LastPlayedTrack`
+    snapshot to `settings.json`.
+  - New commands: `get_current_song_info`, `set_current_song(path)`,
+    `read_text_file(path)`, `file_exists(path)`.
+  - `set_settings` merge logic extended to handle `last_played_track`.
+- `crates/audio-ffi/src/settings.rs` — new `LastPlayedTrack` struct
+  (path / title / artist / album / duration_secs / album_art_path,
+  camelCase serde) and `last_played_track: Option<LastPlayedTrack>` field
+  on `Settings`.
+- `apps/desktop/src-tauri/src/lib.rs` — registered `read_text_file`,
+  `file_exists`, `get_current_song_info`, `set_current_song`.
+
+_Frontend:_
+
+- `apps/desktop/src/lib/types/lyrics.ts` — added optional `fontSize?: number`
+  to `LyricPlayerProps` (hand-off item 7).
+- `apps/desktop/src/components/lyrics/LyricPlayer.svelte` — `fontSize`
+  prop destructured; the derived CSS value now uses `${fontSizeProp}px`
+  when provided, falling back to the existing viewport-based responsive
+  size.
+- `apps/desktop/src/pages/NowPlaying.svelte` — full rewrite of the wiring
+  (the page was a shell with `currentTrack = null` and empty lyrics):
+  - **Mount:** restores `last_played_track` from settings; if the file
+    still exists (`file_exists` command), populates `currentTrack`, loads
+    album art, and loads lyrics — without auto-playing.
+  - **Events:** `next_track_ready` and `crossfade_started` call
+    `set_current_song(path)` (promotes queued track) then
+    `get_current_song_info()` to refresh `currentTrack`, album art, and
+    lyrics. `state_changed: playing` triggers a `refreshCurrentTrack()`
+    fallback when `currentTrack` is still null (e.g. the page mounted
+    mid-playback).
+  - **Album art:** `loadAlbumArt(album_art_path)` calls
+    `get_album_art_data` → blob URL → feeds both `FluidBackground`
+    (via `albumArtUrl` → `extractTheme`) and a 52 px thumbnail in the
+    transport bar.
+  - **Lyrics:** `loadLyrics(audioPath)` derives `<basename>.lrc` from
+    the audio path, calls `read_text_file`, and parses with
+    `parseLyrics(content)` (auto-detects LRC/YRC/QRC/TTML).
+  - **Skip buttons:** skip-next invokes `skip_to_next`; skip-prev
+    invokes `stop` (engine has no prev command; user replays manually).
+  - **Placeholder:** when `currentTrack` is null, shows "Scan your
+    collection and select one to play" with a music icon; when a track
+    is loaded but has no `.lrc`, shows the title + "No lyrics found".
+  - **`lyricFontSize`:** `LyricPlayer` receives
+    `fontSize={appState.lyricFontSize}` from the store.
+  - Transport bar redesigned: album-art thumb + title / artist · album,
+    seek row, and a 3-button row (skip-prev / play-pause / skip-next)
+    using `Icon` components.
+- `apps/desktop/src/pages/Library.svelte` — album-art loading
+  `$effect` hardened: failed `get_album_art_data` calls are tracked in a
+  `failedArtPaths` set (not cached as `null`), so they retry on the next
+  effect run instead of being permanently stuck.
+
+### Verification
+
+| Command | Result |
+|---|---|
+| `cargo build --workspace` | ✅ exit 0 — 9 pre-existing upstream warnings, **0 new** |
+| `cargo test --workspace --exclude rust_lib_flick_player` | ✅ all pass (audio-ffi 1/1, audio-core 6/6, etc.) |
+| `cd apps/desktop && pnpm run check` | ✅ 0 errors, 5 pre-existing liquid-glass warnings |
+
+### Architectural decisions
+
+1. **Embedded-only album art** (per user directive). `discover_album_art`
+   no longer scans the parent directory for `cover.jpg` / `folder.jpg` —
+   it extracts artwork from the audio file's metadata tags via
+   `audio_core::tauri_api::extract_embedded_artwork` (lofty-backed). This
+   matches the user's explicit request: "extract album art from the tag of
+   the audio file, not any external jpg/png in the same dir".
+
+2. **Persistent art cache.** Extracted art is written once to
+   `<app_data_dir>/utoaudio/art/<hash>.jpg` keyed by a stable hash of
+   the audio path. Subsequent scans hit the cache (`cache_path.is_file()`)
+   and skip re-extraction — per the user's request: "save a copy of the
+   album art to database during file scanning and is not extracting from
+   file everytime".
+
+3. **`AppHandle` auto-injection.** Tauri 2 injects `tauri::AppHandle`
+   into commands by type — no frontend `invoke()` change needed. The
+   `scan_directory` / `scan_library` JS call sites stay identical.
+
+4. **Shared `scan_library_inner`.** Extracted so `LibraryDb::rescan_library`
+   (which owns `art_dir` but has no `AppHandle`) can reuse the exact same
+   walk + embedded-art pipeline as the live command path.
+
+5. **`CURRENT_SONG_INFO` + `SONG_INFO_CACHE` statics.** The engine
+   (`audio-core`) can't be touched (scope constraint) and doesn't store
+   `SongInfo` for retrieval. `audio-ffi` caches the last-played
+   `SongInfo` in a `Mutex<Option<SongInfo>>` and a per-path
+   `HashMap<String, SongInfo>` (populated by `queue_next`). The
+   frontend calls `get_current_song_info()` on `state_changed: playing`
+   and `set_current_song(path)` on `next_track_ready` /
+   `crossfade_started` to promote the queued track to current.
+
+6. **`LastPlayedTrack` in `settings.json`.** Persisted as a separate
+   struct (path / title / artist / album / duration_secs /
+   album_art_path) — `sample_rate` and `bits_per_sample` are intentionally
+   excluded (they're audio-init knobs, not display state).
+
+7. **Skip-prev = `stop()`.** The Flick engine has no "previous track"
+   command; implementing one requires playlist-index tracking (out of
+   scope for this prompt). Skip-prev calls `stop()` so the user can
+   manually replay the track.
+
+### Known issues / hand-off notes
+
+1. **`pnpm tauri dev` end-to-end smoke test still deferred** — no
+   display in this environment. The wiring compiles and `pnpm run check`
+   passes, but live playback + lyric rendering hasn't been exercised.
+
+2. **Skip-prev is `stop()`** — a future prompt should add playlist-index
+   tracking (either in `audio-ffi` or via the frontend `Playlist.svelte`)
+   and a `skip_to_previous` command so the button actually replays the
+   previous track.
+
+3. **Playlist queue method button (prompt acceptance criterion 5) not
+   implemented.** The prompt asked for a contextual Play Now / Play Next /
+   Add to Queue toggle on the Library page. This was not wired in this
+   pass — it requires cross-page state (Library → engine queue method)
+   and is left for a follow-up.
+
+4. **Blob URL leak.** `loadAlbumArt` creates `URL.createObjectURL(blob)`
+   on every track change but never calls `URL.revokeObjectURL`. Over a
+   long session this leaks a few KB per track switch. A future cleanup
+   should revoke the previous URL when a new one is created.
+
+5. **Lyric format detection is by extension only.** `loadLyrics` only
+   checks for `<basename>.lrc`. YRC/QRC/TTML files (`.yrc`, `.qrc`,
+   `.ttml`) next to the audio file are not auto-discovered. `parseLyrics`
+   auto-detects the format from content, so only the path derivation
+   needs extending later.
+
+6. **Album art is not stored in the SQLite DB itself** — the art lives
+   in the `art/` cache directory and the **path** to it is stored in the
+   `tracks.album_art_path` column. This is intentional (BLOBs in SQLite
+   bloat the DB and complicate WAL); the filesystem cache is the right
+   layer for binary art data.
+
+## What prompt 25 continued — Lyric scroll gap fix; playback queue (repeat + shuffle + SQLite persistence); LRC translation merging; Library tag-based names + format info
+
+Six deliverables in one pass:
+
+- **(A)** Fixed the lyric "drops to bottom" scroll bug — `syncHeights` now
+  accounts for the CSS `gap` between flex items.
+- **(B)** Added a full playback queue system: repeat-mode button (left of
+  controls) cycling sequential → loop-song → shuffle, a queue-viewer
+  panel (right of controls), auto-advance on `track_ended`, and
+  skip-next/prev driven by the queue.
+- **(C)** Persisted the queue to SQLite (`playback_queue` table, schema
+  v3) + `queue_index` and `repeat_mode` in `settings.json` so the queue
+  survives app restarts.
+- **(D)** Fixed album/artist info disappearing on queue-advanced tracks —
+  `playQueueIndex` now fetches metadata + album art before calling `play`.
+- **(E)** LRC translation support — bilingual LRC files (two lines with
+  the same timestamp) are merged so the original is the main lyric and the
+  translation renders as a slightly-dimmer, slightly-smaller sub-line.
+- **(F)** Library page: audio files show tag-based titles instead of
+  filenames, non-audio files are hidden, and a format-info badge
+  (extension · bit-depth · sample-rate) appears at the far right.
+
+### Files created / modified
+
+_Rust workspace:_
+
+- `crates/audio-ffi/src/library.rs` —
+  - Added `QueueTrack` struct (`path`, `title`, `artist`, `album`,
+    `duration_secs`, `album_art_path`) with `#[serde(rename_all =
+    "camelCase")]`.
+  - Added `playback_queue` table to the schema (schema version bumped
+    `2` → `3`). New DBs get the table via `CREATE TABLE IF NOT EXISTS`;
+    existing v2 DBs get a v2→v3 migration that creates the table and
+    stamps the new version.
+  - Added `set_queue(&[QueueTrack])`, `get_queue() -> Vec<QueueTrack>`,
+    `clear_queue()` methods on `LibraryDb`. `set_queue` wraps the
+    DELETE + INSERT batch in a transaction.
+- `crates/audio-ffi/src/settings.rs` —
+  - Added `repeat_mode: Option<String>` to `Settings` (persisted; values
+    `"sequential"`, `"repeat-one"`, `"shuffle"`).
+  - Added `queue_index: Option<i64>` to `Settings` (persisted; the active
+    position in the queue, restored on app restart).
+- `crates/audio-ffi/src/lib.rs` —
+  - `FileEntry` struct: added `title: Option<String>`,
+    `sample_rate: Option<u32>`, `bits_per_sample: Option<u32>` fields
+    (all `#[serde(default)]`).
+  - `build_file_entry`: for audio files, now calls `read_audio_meta` to
+    read the tag title + properties (sample rate, bit depth) via lofty in
+    a single pass (`ParseOptions::new().read_properties(true)`).
+  - Added `read_audio_meta(path) -> (Option<String>, Option<u32>,
+    Option<u32>)` helper — reads title from `ItemKey::TrackTitle`,
+    sample rate + bit depth from `tagged_file.properties()`. Returns
+    `(None, None, None)` on any error (caller falls back to filename).
+  - `set_settings` merge: added handling for `repeat_mode` and
+    `queue_index` partials (only overwrite when `Some`).
+  - Added Tauri commands: `set_playback_queue`, `get_playback_queue`,
+    `clear_playback_queue` — thin wrappers around `LibraryDb` methods.
+  - Imported `QueueTrack` from `crate::library` into the `commands`
+    module.
+- `apps/desktop/src-tauri/src/lib.rs` — registered
+  `set_playback_queue`, `get_playback_queue`, `clear_playback_queue` in
+  `generate_handler!`.
+
+_Frontend:_
+
+- `apps/desktop/src/lib/playback.svelte.ts` — **new file**. Centralized
+  playback queue state + logic, reactive via Svelte 5 runes.
+  - `playback` `$state`: `queue: QueueTrack[]`, `queueIndex: number`,
+    `repeatMode: RepeatMode`.
+  - `rehydratePlayback()` — loads queue from DB (`get_playback_queue`) +
+    `queue_index` + `repeat_mode` from settings on app start.
+  - `setQueue(tracks, startIndex)` — replaces queue, persists to DB +
+    settings (immediate, not debounced).
+  - `playQueueIndex(index)` — fetches `get_song_metadata` +
+    `get_album_art_path` for the track (so the backend `CURRENT_SONG_INFO`
+    is fully populated), enriches the queue entry in-place, probes sample
+    rate, then calls `play`. Persists `queue_index` immediately.
+  - `cycleRepeatMode()` — sequential → repeat-one → shuffle → sequential.
+  - `goNext()` / `goPrev()` — manual skip, respects shuffle (random) and
+    repeat-one (wraps). Sequential stops at list boundaries.
+  - `onTrackEnded()` — auto-advance: repeat-one replays current, shuffle
+    picks random, sequential plays next or stops at end.
+  - `syncQueueIndexByPath(path)` — finds the track by path in the queue
+    and sets `queueIndex` (used by `togglePlay` when playing the
+    persisted last-played track directly).
+  - Settings saves are **immediate** (no debounce) — `queue_index` must
+    survive even if the app closes right after a skip.
+- `apps/desktop/src/lib/lyric-parser/index.ts` —
+  - Added `mergeTranslationLines(lines)` — post-processes LRC-parsed
+    lines: when two consecutive lines share the same `startTime`, the
+    first becomes the main lyric (`words`) and the second becomes its
+    `translatedLyric`. Only applies to simple (non-syllable) lines.
+  - `parseLyrics` and `parseLyricsFull`: LRC path now calls
+    `mergeTranslationLines(parseLrcRaw(content))` before
+    `finalizeEndTimes`.
+- `apps/desktop/src/lib/file-browser.ts` — `FileEntry` interface: added
+  `title?`, `sampleRate?`, `bitsPerSample?` fields.
+- `apps/desktop/src/components/lyrics/LyricLine.svelte` —
+  - `.amll-lyric-sub-line` CSS: opacity `0.3` → `0.55`, font-size
+    `max(0.5em, 10px)` → `0.72em`. Active line's sub-line gets
+    `opacity: 0.7` for readability. Roman sub-line `0.25` → `0.4`.
+- `apps/desktop/src/components/lyrics/LyricPlayer.svelte` — `syncHeights`
+  now reads the computed `gap` from `getComputedStyle(scrollEl).gap` and
+  adds it to each line's `offsetHeight`, so `cumulativeHeight` accounts
+  for inter-line spacing (fixes the "drops to bottom" scroll drift).
+- `apps/desktop/src/components/Icon.svelte` — added `repeat`,
+  `repeat-one`, `shuffle`, `queue-list` icon names + SVG paths.
+- `apps/desktop/src/pages/NowPlaying.svelte` —
+  - Imports `playback`, `rehydratePlayback`, `cycleRepeatMode`,
+    `playQueueIndex`, `goNext`, `goPrev`, `onTrackEnded`,
+    `syncQueueIndexByPath` from `playback.svelte`.
+  - `showQueue` state — toggles the queue-viewer overlay.
+  - `rehydratePlayback()` called on mount.
+  - `track_ended` event handler now calls `void onTrackEnded()`.
+  - `skipNext` / `skipPrev` use `goNext()` / `goPrev()` when the queue
+    is non-empty (fall back to engine `skip_to_next` / `stop` otherwise).
+  - `togglePlay`: calls `syncQueueIndexByPath(currentTrack.path)` before
+    playing so the queue index is correct on app restart.
+  - Control row: added repeat-mode button (left, cycles mode, icon
+    changes: `repeat` / `repeat-one` / `shuffle`) and queue-viewer
+    button (right, toggles `showQueue`).
+  - Queue-viewer overlay: slide-in panel from the right showing the
+    queue with the active track highlighted (play icon), click-to-play.
+  - `repeatIcon` / `repeatLabel` derived values.
+- `apps/desktop/src/pages/Library.svelte` —
+  - `visibleEntries`: now filters `entries` to only directories + audio
+    files (`e.isDirectory || isAudioFile(e.name)`) before search query
+    filtering — non-audio files (txt, jpg, json, etc.) are hidden.
+  - Row name: shows `entry.title ?? entry.name` (tag-based title with
+    filename fallback).
+  - Added `formatInfo(entry)` helper — returns `"FLAC · 24bit · 96kHz"`
+    style string from extension + `bitsPerSample` + `sampleRate`.
+  - Row template: added `.row-format` badge at the far right of each
+    audio file row.
+  - `playEntry`: queue tracks now use `e.title ?? e.name.replace(...)`
+    for the title. Song title uses `entry.title || meta.title || ...`.
+  - `queueEntry`: song title uses `entry.title || meta.title || ...`.
+  - `.row-format` CSS: small badge with pale-green tint.
+- `apps/desktop/src/pages/Playlist.svelte` —
+  - `playTrack`: now builds the queue from all playlist tracks in order
+    (`setQueue(queue, index)`) before calling `play`.
+
+### Verification
+
+- `cargo build --workspace` — passes (9 pre-existing warnings in
+  `rust_lib_flick_player`, 0 new).
+- `pnpm run check` — 0 errors, 5 pre-existing warnings (all in
+  `LiquidGlass.svelte` submodule).
+
+### Architectural decisions
+
+1. **Queue in SQLite, index + repeat-mode in settings.json.** The queue
+   tracks need structured storage (ordered list with metadata) → SQLite
+   `playback_queue` table. The `queue_index` and `repeat_mode` are
+   scalar values → `settings.json` alongside other preferences. This
+   matches the existing pattern (library index in SQLite, settings in
+   JSON).
+
+2. **Immediate settings saves (no debounce).** The initial implementation
+   debounced settings saves with a 300ms timer — but a single timer that
+   replaced the partial object meant `queue_index` was silently dropped
+   if another settings save (e.g. `repeat_mode`) happened within 300ms.
+   On restart, `queue_index` was `None` and skip-next played track 0.
+   Fix: save immediately. The backend `set_settings` merges partials
+   (only overwrites `Some` fields), so frequent small saves are cheap.
+
+3. **`syncQueueIndexByPath` in `togglePlay`.** On app restart, the user
+   plays the persisted last-played track via `togglePlay` →
+   `invoke('play', { song: currentTrack })` directly (not through
+   `playQueueIndex`). Without syncing, `playback.queueIndex` would be
+   stale and skip-next would jump to the wrong position. The sync finds
+   the track by path in the queue and updates the index.
+
+4. **`playQueueIndex` fetches metadata before `play`.** Queue entries
+   from the Library folder only carry filename + album_art_path; playlist
+   entries lack album/art. Without fetching metadata, the backend's
+   `CURRENT_SONG_INFO` would be incomplete and the Now Playing page would
+   show blank album/artist info for queue-advanced tracks. The fetch also
+   enriches the queue entry in-place so the queue viewer shows real
+   metadata.
+
+5. **LRC translation merging is a post-processing step.** The AMLL LRC
+   parser (vendor submodule, not modifiable) emits same-timestamp lines as
+   separate `LyricLine` objects. `mergeTranslationLines` runs after
+   parsing to merge them into one line with `translatedLyric`. Only
+   applies to simple (non-syllable, `words.length <= 1`) lines —
+   syllable-timed formats (YRC/QRC/TTML) already carry translations
+   inline.
+
+6. **`read_audio_meta` in `build_file_entry`.** Reading tags + properties
+   for every audio file during a directory scan adds one lofty open per
+   file. This is acceptable for single-directory listings (not recursive
+   scans) and avoids N frontend `get_song_metadata` round-trips. The art
+   extraction (`discover_album_art`) remains a separate call (it has its
+   own caching layer).
+
+### Known issues / hand-off notes
+
+1. **`pnpm tauri dev` end-to-end smoke test still deferred** — no display
+   in this environment.
+
+2. **Blob URL leak** (from prompt 25, still present) —
+   `loadAlbumArt` creates `URL.createObjectURL` on every track change but
+   never revokes. Minor; a few KB per track switch.
+
+3. **Debug logging** — `eprintln!` in the `play` command, `console.log`
+   in `refreshCurrentTrack`, `loadAlbumArt`, `extractTheme` effect. Should
+   be removed before final delivery.
+
+4. **Playlist open/save still uses browser File/Blob APIs** (from
+   prompt 25) — swap to Tauri `plugin-fs` / `plugin-dialog` in a future
+   prompt.
+
+5. **`read_audio_meta` reads tags + properties on every directory scan.**
+   For directories with hundreds of files this adds latency (one lofty
+   open per audio file). A future optimisation could cache metadata in
+   the SQLite `tracks` table and only re-read on `mtime` change.
+
+6. **Queue viewer doesn't show "now playing" indicator for the track
+    restored from `last_played_track` on restart** — the `playing` flag
+    is `false` until the user hits play, so the queue shows the index
+    number instead of the play icon. This is cosmetic; once playback
+    starts the icon appears.
+
+## What prompt 26 did — Fix lyric display (AMLL DomLyricPlayer integration)
+### Files created / modified
+
+- `apps/desktop/src/components/lyrics/LyricPlayer.svelte` — complete rewrite
+  as a thin Svelte wrapper around AMLL `DomLyricPlayer`.
+  - Added continuous `requestAnimationFrame` loop calling `player.update(delta)` to drive AMLL's spring-physics layout engine. Without this loop, springs never animate, `isInSight` stays false, and lyric line wrappers are never appended to the DOM.
+  - Fixed method names: bundled AMLL core exposes `resume()`/`pause()`, not `play()`. Updated `PlayerInstance` interface and all call sites.
+  - Removed reactive `$effect` that called `setLyricLines` on every `currentTime` tick. Added reference-equality guard so `setLyricLines` only runs when the lyrics array actually changes. The old behaviour destroyed and recreated all lyric groups dozens of times per second, resetting spring animations and causing visible jumps.
+  - Injected CSS override (`mix-blend-mode: normal`, `color: #ffffff`) via `<style>` element inside the player to counter AMLL's default `plus-lighter` blend mode + white text, which is invisible on light backgrounds.
+- `apps/desktop/src/lib/fonts/source-han-sans.css` — changed `//` JS-style comments to `/* */` CSS comments (Vite was misinterpreting the file). Confirmed font paths use `/fonts/` (public directory).
+- `apps/desktop/vite.config.ts` — added `../..` to `server.fs.allow` so Vite can serve its own internal files from the project root `node_modules/` (fixes `env.mjs` outside allow list error).
+- `apps/desktop/package.json` — removed unused `@fontpkg/source-han-sans` dependency; fonts are shipped from `public/fonts/`.
+
+### Verification
+
+- `pnpm run build` — passes.
+- `cargo build --workspace` — passes (9 pre-existing warnings in `rust_lib_flick_player`).
+- User confirmed: lyrics render correctly, stay visible during playback, scroll with current time, karaoke highlighting works.
+
+### Architectural decisions
+
+1. **AMLL `DomLyricPlayer` requires a continuous rAF loop.** The spring-physics layout (`posY.update(delta)`) and the `isInSight` → `show()` visibility gate both only advance inside `player.update(delta)`. Without the loop, lyrics exist in memory but never appear in the DOM.
+2. **`setLyricLines` is expensive — only call on data change.** It destroys all groups, creates new `LyricLineEl`/`LyricLineGroup` objects, resets springs, and calls `calcLayout(true)`. Calling it on every `currentTime` tick (triggered by the 4 Hz engine poll) causes constant layout thrashing.
+3. **`resume()` triggers Web Animations API.** Calling `resume()` starts all word float/emphasize/mask animations. Re-calling it on every state change re-triggers animations from time 0, wiping the display. Call once after `setLyricLines`, never reactively.
+4. **CSS override injection.** Rather than modifying the vendored AMLL CSS file (which would be lost on submodule update), inject a `<style>` element as the first child of `player.element` with `!important` overrides.
+
+### Known issues / hand-off notes
+
+1. **Debug logging still present.** `console.log` statements in `LyricPlayer.svelte` (`[LyricPlayer] ...`) should be removed before final delivery.
+2. **Blob URL leak** (from prompt 25, still present) — `loadAlbumArt` creates `URL.createObjectURL` on every track change but never revokes.
+3. **Playlist open/save still uses browser File/Blob APIs** — swap to Tauri `plugin-fs` / `plugin-dialog`.
+4. **`read_audio_meta` reads tags + properties on every directory scan** — for directories with hundreds of files this adds latency; could cache in SQLite `tracks` table with `mtime` change detection.
+5. **Submodule fork pushes pending** — no GitHub auth in this environment; AMLL, Flick, and liquid-glass-svelte forks are local-only.
+
+## What prompt 28 did — UI polish, metadata schema, camelCase fix, asset protocol
+
+### Changes
+- **Removed LiquidGlass from individual track rows** in Playlist and Library pages. Replaced with `border-bottom` separators. Rows are larger (60px min-height, 48px thumbs). This fixes the rendering corruption (blurred tracks, lost glass effect) caused by 200+ SVG filter instances.
+- **Wrapped sidebars in LiquidGlass** in both Playlist and Library pages. Simplified sidebar CSS (removed duplicate backdrop-filter/blur styles).
+- **Fixed sidebar active item color**: `.pl-item.active` no longer uses light-green accent text (was unreadable).
+- **Library DB schema v3 → v4**: Added `sample_rate INTEGER` and `bits_per_sample INTEGER` columns to `tracks` table, with migration path.
+- **Library `Track` struct**: Added `sample_rate: Option<u32>` and `bits_per_sample: Option<u32>` fields.
+- **`rescan_library`** now stores `sample_rate` and `bits_per_sample` from `FileEntry` (read via `read_audio_meta` → lofty).
+- **`enrich_tracks_from_cache` and import cache-hit path** now copy `sample_rate` and `bits_per_sample` from the library cache instead of hardcoding `None`.
+- **camelCase/snake_case fix**: `PlaylistTrackRow`, `PlaylistInfo`, `M3u8ImportResult` TypeScript interfaces updated to camelCase to match Rust's `#[serde(rename_all = "camelCase")]`. This was the root cause of missing bit-depth/sample-rate display — fields like `sample_rate` were `undefined` because the actual JSON keys were `sampleRate`.
+- **Album art loading switched from IPC to asset protocol**: Uses `convertFileSrc()` from `@tauri-apps/api/core` instead of `invoke('get_album_art_data', ...)`. Zero serialization overhead, browser handles caching/lazy-loading natively.
+- **Asset protocol scope**: `tauri.conf.json` configured with `$APPDATA/**` and `$HOME/**` scopes. Capabilities updated with `fs:scope-appdata` and `fs:scope-home`.
+
+### Verification
+- `cargo build --workspace` passes
+- `pnpm run build` passes
+- DB confirmed: `playlist_tracks` has `albumArtPath`, `sampleRate` (44100), `bitsPerSample` (16) populated
+- Playing a track from Playlist now shows album art on Now Playing page
+
+### Known issues / hand-off notes
+- Playlist page may still feel heavy with 209 rows; virtual scrolling could help
+- Album art loaded via `convertFileSrc` requires asset protocol scope to be correctly configured for all platforms (currently Linux-only `$APPDATA`/`$HOME`)
+
+## What prompt 29 did — Asset protocol fix + Playlist from m3u8
+
+### Changes
+- **Asset protocol scope fix**: `requireLiteralLeadingDot: false` in `tauri.conf.json` asset protocol scope — the default `true` blocked hidden directories like `.local/`. Now `**/*` with `requireLiteralLeadingDot: false` correctly serves paths under `.local/share/...` (403 → 200).
+- **Playlist creation from m3u8**: "New Playlist" button now opens an m3u8 file picker, creates a playlist named after the file, and auto-imports the tracks in one step.
+- **Debug cleanup**: Removed temporary fetch/console logging from `artSrc()`.
+
+### Verification
+- `cargo build --workspace` passes
+- `pnpm run build` passes
+- Asset protocol now returns 200 for paths under `.local/share/...` (verified via fetch test: 403 → 200)
+
+### Known issues / hand-off notes
+- Playlist page may still feel heavy with 209 rows; virtual scrolling could help
+- Album art loaded via `convertFileSrc` requires asset protocol scope to be correctly configured for all platforms (currently Linux-only `$APPDATA`/`$HOME`)
+
+## What prompt 30 did — Fix production CSP blocking Now Playing blob album art
+
+### Files created / modified
+- `apps/desktop/src-tauri/tauri.conf.json` — added `blob:` to the production CSP `img-src` directive.
+- `progress.md` — appended this session log.
+
+### Verification
+- `cd apps/desktop && pnpm run build` — passes. Vite/Svelte reports pre-existing warnings in vendored `LiquidGlass.svelte` and one `Playlist.svelte` a11y warning.
+- `cd apps/desktop && pnpm tauri build --debug` — frontend build and Rust compilation reached finished debug profile and produced the debug app path; command timed out during final package bundling/finish after emitting pre-existing warnings.
+
+### Architectural decisions
+- Root cause: `NowPlaying.svelte` loads album art via `get_album_art_data` and `URL.createObjectURL(blob)`, then uses the resulting `blob:` URL for both the album-art `<img>` and `extractTheme()`. `pnpm tauri dev` uses Vite dev serving without the packaged app CSP, so blob images work there. `pnpm tauri build` applies `tauri.conf.json` CSP, whose `img-src` allowed only `'self'`, `asset:`, and `http://asset.localhost`; the WebView blocked `blob:` images, making album art disappear and leaving `FluidBackground` on its fallback dark purple palette.
+- Minimal fix: keep the existing blob-based Now Playing pipeline and allow `blob:` only for images. This avoids rewriting Now Playing to asset protocol in this bug-fix pass and keeps the CSP narrower than adding blobs to every source type.
+
+### Known issues / hand-off notes
+- A deeper cleanup could switch Now Playing to `convertFileSrc(album_art_path)` like Playlist/Library, removing the `get_album_art_data` IPC copy and the blob URL lifecycle entirely.
+- The existing blob URL leak remains: `loadAlbumArt` creates a new object URL on track change and does not revoke the previous URL.

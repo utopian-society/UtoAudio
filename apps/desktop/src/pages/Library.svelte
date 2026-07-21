@@ -1,8 +1,8 @@
 <script lang="ts">
-	import { invoke } from '@tauri-apps/api/core';
+	import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 	import { listen } from '@tauri-apps/api/event';
 	import type { UnlistenFn } from '@tauri-apps/api/event';
-	import {
+import {
 		scanDirectory,
 		listAudioFiles,
 		isAudioFile,
@@ -12,6 +12,7 @@
 	import Icon from '../components/Icon.svelte';
 	import type { IconName } from '../components/Icon.svelte';
 	import { LiquidGlass } from '../lib/liquid-glass';
+import { setQueue, playQueueIndex, type QueueTrack } from '../lib/playback.svelte';
 
 	/** Mirrors `audio_core::tauri_api::SongInfo`. Subset needed for `play`. */
 	interface SongInfo {
@@ -20,6 +21,24 @@
 		artist?: string;
 		album?: string;
 		duration_secs?: number;
+		album_art_path?: string;
+		sample_rate?: number;
+		bits_per_sample?: number;
+	}
+
+	/** Probe a file for native sample rate / bit depth before playback. */
+	async function probeSong(path: string): Promise<{ sample_rate?: number; bits_per_sample?: number; duration_secs?: number }> {
+		try {
+			const info = await invoke<{ sample_rate: number; channels: number; duration_secs: number; bits_per_sample?: number }>('probe_audio_file', { path });
+			return {
+				sample_rate: info.sample_rate,
+				bits_per_sample: info.bits_per_sample,
+				duration_secs: info.duration_secs,
+			};
+		} catch (e) {
+			console.warn('[Library] probe_audio_file failed:', e);
+			return {};
+		}
 	}
 
 	// -----------------------------------------------------------------------
@@ -193,7 +212,17 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 	// -----------------------------------------------------------------------
 
 	/** Current entries filtered by the user's search query. */
-	const visibleEntries = $derived(filterByQuery(entries, searchQuery));
+	const visibleEntries = $derived(
+		filterByQuery(
+			entries.filter((e) => e.isDirectory || isAudioFile(e.name)),
+			searchQuery,
+		),
+	);
+
+	// Load album art in batches when entries change
+	$effect(() => {
+		if (visibleEntries.length > 0) loadAlbumArts(visibleEntries);
+	});
 
 	function filterByQuery(items: FileEntry[], query: string): FileEntry[] {
 		const q = query.trim().toLowerCase();
@@ -202,10 +231,38 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 	}
 
 	// -----------------------------------------------------------------------
+	// Album art — loaded in batches of 50 to avoid OOM kills.
+	// -----------------------------------------------------------------------
+
+	let artUrls = $state<Record<string, string>>({});
+
+	async function loadAlbumArts(entries: FileEntry[]): Promise<void> {
+		const paths = entries
+			.map(e => e.albumArtPath)
+			.filter((p): p is string => !!p);
+		if (paths.length === 0) return;
+		const TOTAL = paths.length;
+		const BATCH_SIZE = 50;
+		for (let i = 0; i < TOTAL; i += BATCH_SIZE) {
+			const batch = paths.slice(i, i + BATCH_SIZE);
+			await Promise.allSettled(batch.map(async (artPath) => {
+				try { artUrls[artPath] = convertFileSrc(artPath); } catch {}
+			}));
+			console.debug(`Library album art ${Math.min(i + BATCH_SIZE, TOTAL)}/${TOTAL}`);
+			await new Promise(r => setTimeout(r, 0));
+		}
+	}
+
+	function artSrc(albumArtPath: string | null | undefined): string | null {
+		if (!albumArtPath) return null;
+		return artUrls[albumArtPath] ?? null;
+	}
+
+	// -----------------------------------------------------------------------
 	// Playback + "add to playlist"
 	// -----------------------------------------------------------------------
 
-	function playEntry(entry: FileEntry): void {
+	async function playEntry(entry: FileEntry): Promise<void> {
 		console.log('[Library] playEntry:', entry.name, entry.isDirectory ? '(dir)' : '(file)', entry.path);
 		if (entry.isDirectory) {
 			void enterDirectory(entry.path);
@@ -215,10 +272,54 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 			console.warn('[Library] playEntry: not an audio file:', entry.name);
 			return;
 		}
+		// Build the playback queue from all audio files in the current
+		// folder (non-recursive, alphanumerically sorted — `entries` is
+		// already sorted by `sort_entries` on the Rust side, directories
+		// first then files by lowercase name). This gives the "play through
+		// the folder" context the Now Playing page auto-advances within.
+		const folderAudio = entries
+			.filter((e) => !e.isDirectory && isAudioFile(e.name))
+			.map((e): QueueTrack => ({
+				path: e.path,
+				title: e.title ?? e.name.replace(/\.[^/.]+$/, ''),
+				album_art_path: e.albumArtPath,
+			}));
+		const startIndex = folderAudio.findIndex((t) => t.path === entry.path);
+
+		const probe = await probeSong(entry.path);
+		let meta: { title?: string; artist?: string; album?: string } = {};
+		try {
+			meta = await invoke<{ title?: string; artist?: string; album?: string }>('get_song_metadata', { path: entry.path });
+		} catch (e) {
+			console.warn('[Library] get_song_metadata failed:', e);
+		}
 		const song: SongInfo = {
 			path: entry.path,
-			title: entry.name.replace(/\.[^/.]+$/, ''),
+			title: entry.title || meta.title || entry.name.replace(/\.[^/.]+$/, ''),
+			artist: meta.artist,
+			album: meta.album,
+			album_art_path: entry.albumArtPath,
+			sample_rate: probe.sample_rate,
+			bits_per_sample: probe.bits_per_sample,
+			duration_secs: probe.duration_secs,
 		};
+
+		// Populate the queue with metadata-enriched tracks so the queue
+		// viewer shows titles/artists, not just filenames.
+		if (folderAudio.length > 1 && startIndex >= 0) {
+			// Enrich queue entries with metadata (best-effort, non-blocking
+			// — the playing track uses the metadata we already fetched).
+			const enriched = folderAudio.map((t) => ({ ...t }));
+			enriched[startIndex] = {
+				...enriched[startIndex],
+				title: song.title,
+				artist: song.artist,
+				album: song.album,
+				duration_secs: song.duration_secs,
+			};
+			await setQueue(enriched, startIndex);
+		}
+
 		console.log('[Library] invoking play with:', song);
 		invoke('play', { song })
 			.then(() => {
@@ -230,12 +331,23 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 			});
 	}
 
-	function queueEntry(entry: FileEntry): void {
+	async function queueEntry(entry: FileEntry): Promise<void> {
 		if (entry.isDirectory) return;
 		if (!isAudioFile(entry.name)) return;
+		const probe = await probeSong(entry.path);
+		let meta: { title?: string; artist?: string; album?: string } = {};
+		try {
+			meta = await invoke<{ title?: string; artist?: string; album?: string }>('get_song_metadata', { path: entry.path });
+		} catch {}
 		const song: SongInfo = {
 			path: entry.path,
-			title: entry.name.replace(/\.[^/.]+$/, ''),
+			title: entry.title || meta.title || entry.name.replace(/\.[^/.]+$/, ''),
+			artist: meta.artist,
+			album: meta.album,
+			album_art_path: entry.albumArtPath,
+			sample_rate: probe.sample_rate,
+			bits_per_sample: probe.bits_per_sample,
+			duration_secs: probe.duration_secs,
 		};
 		invoke('queue_next', { song })
 			.then(() => {
@@ -245,6 +357,24 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 				console.error('[Library] queue_next failed:', e);
 				reportError(e);
 			});
+	}
+
+	/** Add all audio files in a folder (recursive) to a new playlist. */
+	async function addFolderToPlaylist(folderPath: string): Promise<void> {
+		try {
+			const files = await listAudioFiles(folderPath);
+			if (files.length === 0) {
+				reportError('No audio files found in this folder');
+				return;
+			}
+			const folderName = folderPath.split('/').filter(Boolean).pop() || 'Folder';
+			const playlistId = await invoke<number>('create_playlist', { name: folderName });
+			const paths = files.map(f => f.path);
+			await invoke('add_tracks_to_playlist', { playlistId, paths });
+			console.log('[Library] added', paths.length, 'files to playlist', folderName);
+		} catch (e) {
+			reportError(e);
+		}
 	}
 
 	/** Show all audio files under the current path (across sub-folders). */
@@ -277,6 +407,19 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
 		if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 		return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+	}
+	/** Format the audio file's technical metadata for the far-right badge:
+	 *  extension · bit-depth · sample-rate. */
+	function formatInfo(entry: FileEntry): string {
+		if (entry.isDirectory) return '';
+		const ext = entry.name.split('.').pop()?.toUpperCase() ?? '';
+		const parts: string[] = [ext];
+		if (entry.bitsPerSample) parts.push(`${entry.bitsPerSample}bit`);
+		if (entry.sampleRate) {
+			const khz = (entry.sampleRate / 1000).toFixed(1).replace(/\.0$/, '');
+			parts.push(`${khz}kHz`);
+		}
+		return parts.join(' · ');
 	}
 	function iconFor(entry: FileEntry): IconName {
 		return entry.isDirectory ? 'folder' : 'music';
@@ -331,7 +474,8 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 	</header>
 
 	<div class="content">
-		<aside class="sidebar">
+		<LiquidGlass roundness={0} accent="#bef264" contrast="light">
+			<aside class="sidebar">
 			<div class="sidebar-section">
 				<div class="sidebar-title">Scan directories</div>
 				{#if scanRoots.length === 0}
@@ -373,6 +517,7 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 				</form>
 			</div>
 		</aside>
+		</LiquidGlass>
 
 		<main class="main">
 			{#if loading}
@@ -383,43 +528,71 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 					<p>{searchQuery ? 'No matches.' : 'This folder is empty.'}</p>
 				</div>
 			{:else}
-				<div class="grid">
+				<div class="rows">
 					{#each visibleEntries as entry (entry.path)}
-							<LiquidGlass roundness={16} accent="#bef264" contrast="light">
-								<div
-									class="card-inner"
-									class:dir={entry.isDirectory}
-								>
-									<button
-										class="card-main"
-										type="button"
-										onclick={() => playEntry(entry)}
-										oncontextmenu={(e) => {
-											if (entry.isDirectory) return;
-											e.preventDefault();
-											queueEntry(entry);
-										}}
-										aria-label={
-											entry.isDirectory
-												? `Open ${entry.name}`
-												: `Play ${entry.name}`
-										}
-									>
-										<div class="card-icon"><Icon name={iconFor(entry)} size={22} /> </div>
-										<div class="card-body">
-											<div class="card-name">{entry.name}</div>
-											<div class="card-meta">
-												{#if entry.isDirectory}
-													Folder
-												{:else}
-													{formatSize(entry.size)}
-												{/if}
-											</div>
-										</div>
-									</button>
-									{#if !entry.isDirectory}
+						<div
+							class="row-inner"
+							class:dir={entry.isDirectory}
+						>
+								<div class="row-thumb">
+									{#if entry.isDirectory}
+										<div class="thumb-icon"><Icon name="folder" size={24} /></div>
+									{:else}
+										{@const artUrl = artSrc(entry.albumArtPath)}
+										{#if artUrl}
+											<img src={artUrl} alt="" class="thumb-img" />
+										{:else}
+											<div class="thumb-icon fallback"><Icon name="music" size={24} /></div>
+										{/if}
+									{/if}
+								</div>
+
+							<button
+								class="row-main"
+								type="button"
+								onclick={() => playEntry(entry)}
+								oncontextmenu={(e) => {
+									if (entry.isDirectory) return;
+									e.preventDefault();
+									queueEntry(entry);
+								}}
+								aria-label={
+									entry.isDirectory
+										? `Open ${entry.name}`
+										: `Play ${entry.title ?? entry.name}`
+								}
+							>
+								<div class="row-body">
+									<div class="row-name">{entry.title ?? entry.name}</div>
+									<div class="row-meta">
+										{#if entry.isDirectory}
+											Folder
+										{:else}
+											{formatSize(entry.size)}
+										{/if}
+									</div>
+								</div>
+							</button>
+
+							{#if !entry.isDirectory}
+								<span class="row-format">{formatInfo(entry)}</span>
+							{/if}
+
+								<div class="row-actions">
+									{#if entry.isDirectory}
 										<button
-											class="card-add"
+											class="row-add"
+											type="button"
+											onclick={(e) => {
+												e.stopPropagation();
+												void addFolderToPlaylist(entry.path);
+											}}
+											aria-label="Add folder to playlist"
+											title="Add all audio files in this folder to a playlist"
+										><Icon name="plus" size={14} /></button>
+									{:else}
+										<button
+											class="row-add"
 											type="button"
 											onclick={(e) => {
 												e.stopPropagation();
@@ -427,11 +600,11 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 											}}
 											aria-label="Add to playlist"
 											title="Add to playlist"
-										><Icon name="plus" size={14} /> </button>
+										><Icon name="plus" size={14} /></button>
 									{/if}
 								</div>
-							</LiquidGlass>
-						{/each}
+							</div>
+					{/each}
 				</div>
 			{/if}
 		</main>
@@ -618,15 +791,8 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 
 	.sidebar {
 		width: 240px;
+		height: 100%;
 		flex-shrink: 0;
-		background: linear-gradient(135deg, var(--uto-glass-gradient-start), var(--uto-glass-gradient-end));
-		backdrop-filter: blur(var(--uto-glass-blur)) saturate(var(--uto-glass-saturate)) brightness(var(--uto-glass-brightness));
-		-webkit-backdrop-filter: blur(var(--uto-glass-blur)) saturate(var(--uto-glass-saturate)) brightness(var(--uto-glass-brightness));
-		box-shadow:
-			inset 0 1px 0 var(--uto-rim-light),
-			inset 0 -1px 0 var(--uto-glass-inset-bottom),
-			0 8px 32px var(--uto-glass-outer-shadow);
-		border-right: 1px solid var(--uto-glass-border);
 		padding: 14px 12px;
 		overflow-y: auto;
 		scrollbar-width: thin;
@@ -788,25 +954,56 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 		font-size: 14px;
 	}
 
-	.grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-		gap: 12px;
+	.rows {
+		display: flex;
+		flex-direction: column;
 	}
-	.card-inner {
+	.row-inner {
 		position: relative;
-		padding: 14px;
+		padding: 10px 14px;
 		display: flex;
 		gap: 12px;
-		align-items: flex-start;
+		align-items: center;
+		min-height: 60px;
+		border-bottom: 1px solid var(--uto-glass-border);
+		transition: background 0.15s;
 	}
-	.card-inner.dir .card-name {
+	.row-inner:hover { background: rgba(190,242,100,0.04); }
+	.row-inner.dir .row-name {
 		color: var(--uto-text-strong);
 	}
-	.card-main {
+
+	.row-thumb {
+		flex-shrink: 0;
+		width: 48px;
+		height: 48px;
+		border-radius: 8px;
+		overflow: hidden;
+		background: rgba(190, 242, 100, 0.08);
 		display: flex;
-		gap: 12px;
-		align-items: flex-start;
+		align-items: center;
+		justify-content: center;
+	}
+	.thumb-icon {
+		color: var(--uto-accent-green, #bef264);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+	.thumb-icon.fallback {
+		color: var(--uto-text-faint);
+	}
+	.thumb-img {
+		width: 48px;
+		height: 48px;
+		object-fit: cover;
+		display: block;
+	}
+
+	.row-main {
+		display: flex;
+		gap: 10px;
+		align-items: center;
 		flex: 1;
 		min-width: 0;
 		appearance: none;
@@ -818,25 +1015,14 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 		padding: 0;
 		text-align: left;
 	}
-	.card-icon {
-		font-size: 28px;
-		width: 44px;
-		height: 44px;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		border-radius: 12px;
-		background: rgba(190, 242, 100, 0.08);
-		flex-shrink: 0;
-	}
-	.card-body {
+	.row-body {
 		flex: 1;
 		min-width: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 4px;
+		gap: 2px;
 	}
-	.card-name {
+	.row-name {
 		font-size: 14px;
 		font-weight: 500;
 		color: var(--uto-text);
@@ -844,34 +1030,49 @@ const breadcrumbs = $derived(buildBreadcrumbs(currentPath));
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.card-meta {
+	.row-meta {
 		font-size: 12px;
 		color: var(--uto-text-muted);
 	}
-	.card-add {
-		position: absolute;
-		top: 8px;
-		right: 8px;
+
+	.row-format {
+		flex-shrink: 0;
+		font-size: 10px;
+		font-weight: 500;
+		font-variant-numeric: tabular-nums;
+		color: var(--uto-text-faint);
+		letter-spacing: 0.02em;
+		white-space: nowrap;
+		padding: 2px 8px;
+		border-radius: 6px;
+		background: rgba(190, 242, 100, 0.06);
+		border: 1px solid rgba(190, 242, 100, 0.1);
+	}
+
+	.row-actions {
+		flex-shrink: 0;
+		display: flex;
+		align-items: center;
+		gap: 4px;
+	}
+	.row-add {
 		appearance: none;
 		border: none;
 		background: transparent;
 		color: var(--uto-text-faint);
 		font-size: 18px;
 		font-weight: 500;
-		width: 26px;
-		height: 26px;
+		width: 30px;
+		height: 30px;
 		border-radius: 8px;
 		cursor: pointer;
-		display: none;
+		display: flex;
 		align-items: center;
 		justify-content: center;
 		transition: background 0.18s cubic-bezier(0.22,1,0.36,1),
 			color 0.18s cubic-bezier(0.22,1,0.36,1);
 	}
-	.card-inner:hover .card-add {
-		display: flex;
-	}
-	.card-add:hover {
+	.row-add:hover {
 		background: rgba(190, 242, 100, 0.18);
 		color: var(--uto-accent-green, #bef264);
 	}

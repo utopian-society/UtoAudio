@@ -18,11 +18,14 @@ crate-type = ["cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 audio-ffi = { workspace = true }
+audio-core = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"
 tokio = { workspace = true, features = ["sync"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
 
 [features]
 # No optional features yet. The custom titlebar is rendered in the frontend.

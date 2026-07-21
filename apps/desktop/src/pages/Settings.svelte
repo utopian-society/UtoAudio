@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { invoke } from '@tauri-apps/api/core';
-	import { emit } from '@tauri-apps/api/event';
-	import { scanLibrary } from '../lib/file-browser';
+	import { emit, listen } from '@tauri-apps/api/event';
+	import type { UnlistenFn } from '@tauri-apps/api/event';
 	import { AUDIO_EXTENSIONS } from '../lib/file-browser';
 	import Icon from '../components/Icon.svelte';
 	import { LiquidGlass } from '../lib/liquid-glass';
@@ -10,7 +10,11 @@
 		toggleExtension as toggleExt,
 		isExtensionEnabled,
 		setLyricFontSize,
+		setOutputDevice,
+		ensureAlsaDevices,
+		refreshAlsaDevices,
 	} from '../lib/store.svelte';
+	import type { OutputDeviceSettings } from '../lib/store.svelte';
 
 	// -----------------------------------------------------------------------
 	// Backend serde types (camelCase args per Tauri's default convention)
@@ -77,38 +81,65 @@
 	}
 
 	// -----------------------------------------------------------------------
-	// Audio output
+	// Audio output — device selection
 	// -----------------------------------------------------------------------
 
-	let highResMode = $state(false);
-	let bitPerfect = $state(false);
-	let four32Hz = $state(false);
-	let sampleRatePreference = $state<number | ''>('');
+	let outputBackend = $state<'pipewire' | 'alsa'>(
+		(appState.outputDevice?.backend as 'pipewire' | 'alsa') ?? 'pipewire',
+	);
+	let alsaDevice = $state(appState.outputDevice?.alsaDevice ?? '');
+	let loadingAlsaDevices = $state(false);
 
-	async function onHighResChange(v: boolean): Promise<void> {
-		highResMode = v;
+	async function loadAlsaDevices(): Promise<void> {
+		loadingAlsaDevices = true;
 		try {
-			await invoke('set_high_res_mode', { enabled: v });
+			await ensureAlsaDevices();
+		} finally {
+			loadingAlsaDevices = false;
+		}
+	}
+
+	async function onRefreshAlsaDevices(): Promise<void> {
+		loadingAlsaDevices = true;
+		try {
+			await refreshAlsaDevices();
+		} finally {
+			loadingAlsaDevices = false;
+		}
+	}
+
+	async function onOutputBackendChange(backend: 'pipewire' | 'alsa'): Promise<void> {
+		outputBackend = backend;
+		const od: OutputDeviceSettings = {
+			backend,
+			alsaDevice: backend === 'alsa' ? (alsaDevice || undefined) : undefined,
+		};
+		setOutputDevice(od);
+		try {
+			await invoke('set_output_device', {
+				backend,
+				alsaDevice: backend === 'alsa' ? (alsaDevice || null) : null,
+			});
 		} catch (e) {
 			reportError(e);
 		}
 	}
-	async function onBitPerfectChange(v: boolean): Promise<void> {
-		bitPerfect = v;
+
+	async function onAlsaDeviceChange(): Promise<void> {
+		setOutputDevice({ backend: 'alsa', alsaDevice: alsaDevice || undefined });
 		try {
-			await invoke('set_dap_bit_perfect_enabled', { enabled: v });
+			await invoke('set_output_device', {
+				backend: 'alsa',
+				alsaDevice: alsaDevice || null,
+			});
 		} catch (e) {
 			reportError(e);
 		}
 	}
-	async function on432Change(v: boolean): Promise<void> {
-		four32Hz = v;
-		try {
-			await invoke('set_432hz_tuning_enabled', { enabled: v });
-		} catch (e) {
-			reportError(e);
-		}
-	}
+
+	$effect(() => {
+		void loadAlsaDevices();
+	});
 
 	// -----------------------------------------------------------------------
 	// Playback — crossfade + volume
@@ -236,6 +267,7 @@
 	let scanning = $state(false);
 	let scanSummary = $state('');
 	let scanSummaryTimer: ReturnType<typeof setTimeout> | null = null;
+	let scanProgress = $state<{ phase: string; current: number; total?: number; root?: string } | null>(null);
 
 	function flashSummary(text: string): void {
 		scanSummary = text;
@@ -253,25 +285,37 @@
 			return;
 		}
 		scanning = true;
+		scanProgress = null;
+		let unlisten: UnlistenFn | null = null;
 		try {
-			// Normalise the extension set: prepend `.` if missing, lowercase.
-			const extensions = Array.from(appState.enabledExtensions).map((ext) =>
-				ext.startsWith('.') ? ext.toLowerCase() : `.${ext.toLowerCase()}`,
+			const unlistenPromise = listen<{ phase: string; current: number; total?: number; root?: string }>(
+				'scan-progress',
+				(ev) => {
+					scanProgress = ev.payload;
+				},
 			);
-			const results = await scanLibrary(scanRoots, extensions);
-			const dirs = results.filter((r) => r.isDirectory).length;
-			const files = results.length - dirs;
-			flashSummary(
-				`Scanned ${results.length} entr${results.length === 1 ? 'y' : 'ies'} (${dirs} folders · ${files} audio files)`,
-			);
+			unlisten = await unlistenPromise;
+
+			let total = 0;
+			for (const root of scanRoots) {
+				try {
+					const index = await invoke('rescan_library', { path: root });
+					total += index.tracks.length;
+				} catch (e) {
+					reportError(e);
+				}
+			}
+			flashSummary(`Scanned ${total} audio files across ${scanRoots.length} root${scanRoots.length === 1 ? '' : 's'}`);
 			await emit('library:rescanned', {
-				count: results.length,
+				count: total,
 				roots: [...scanRoots],
 			});
 		} catch (e) {
 			reportError(e);
 		} finally {
 			scanning = false;
+			scanProgress = null;
+			if (unlisten) unlisten();
 		}
 	}
 
@@ -321,28 +365,42 @@
 				{#if audioOpen}
 					<div class="card-body">
 						<div class="row">
-							<label for="sr-pref">Preferred sample rate</label>
-							<select id="sr-pref" bind:value={sampleRatePreference}>
-								<option value="">Auto</option>
-								<option value={44100}>44.1 kHz</option>
-								<option value={48000}>48 kHz</option>
-								<option value={96000}>96 kHz</option>
-								<option value={192000}>192 kHz</option>
-								<option value={384000}>384 kHz</option>
+							<label for="out-backend">Output device</label>
+							<select
+								id="out-backend"
+								bind:value={outputBackend}
+								onchange={() => onOutputBackendChange(outputBackend)}
+							>
+								<option value="pipewire">PipeWire</option>
+								<option value="alsa">ALSA (Direct Hardware)</option>
 							</select>
 						</div>
-						<div class="row">
-							<label for="bp">Bit-perfect (DAP Internal)</label>
-							{@render toggleSwitch({ checked: bitPerfect, onChange: onBitPerfectChange, id: 'bp' })}
-						</div>
-						<div class="row">
-							<label for="hr">High-res mode</label>
-							{@render toggleSwitch({ checked: highResMode, onChange: onHighResChange, id: 'hr' })}
-						</div>
-						<div class="row">
-							<label for="f32">432 Hz tuning</label>
-							{@render toggleSwitch({ checked: four32Hz, onChange: on432Change, id: 'f32' })}
-						</div>
+						{#if outputBackend === 'alsa'}
+							<div class="row">
+								<label for="alsa-dev">ALSA device</label>
+								<select
+									id="alsa-dev"
+									bind:value={alsaDevice}
+									onchange={onAlsaDeviceChange}
+									disabled={loadingAlsaDevices || appState.alsaDevices.length === 0}
+								>
+									<option value="">Auto (first hw device)</option>
+									{#each appState.alsaDevices as dev (dev)}
+										<option value={dev}>{dev}</option>
+									{/each}
+								</select>
+								<button
+									class="btn icon-only"
+									type="button"
+									onclick={onRefreshAlsaDevices}
+									disabled={loadingAlsaDevices}
+									aria-label="Refresh ALSA devices"
+									title="Refresh device list"
+								>
+									<Icon name="rescan" size={14} />
+								</button>
+							</div>
+						{/if}
 					</div>
 				{/if}
 			</section>
@@ -514,6 +572,14 @@
 										<span>Rescan now</span>
 									{/if}
 								</button>
+								{#if scanning && scanProgress}
+									<span class="scan-progress-text">
+										{scanProgress.current} files
+										{#if scanProgress.root}
+											· {scanProgress.root}
+										{/if}
+									</span>
+								{/if}
 								{#if scanSummary}
 									<span class="scan-summary">{scanSummary}</span>
 								{/if}
@@ -1021,11 +1087,15 @@
 	}
 	.scan-summary {
 		font-size: 12px;
-		color: var(--uto-accent-green, #bef264);
+		color: var(--uto-text);
 		background: rgba(190, 242, 100, 0.08);
 		padding: 4px 10px;
 		border-radius: 8px;
 		border: 1px solid rgba(190, 242, 100, 0.18);
+	}
+	.scan-progress-text {
+		font-size: 12px;
+		color: var(--uto-text-muted);
 	}
 	@keyframes spin {
 		to { transform: rotate(360deg); }

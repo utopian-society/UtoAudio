@@ -1,8 +1,8 @@
-// This file is part of utoaudio, licensed under AGPL-3.0.
-// Derivative work based on AMLL (https://github.com/amll-dev/applemusic-like-lyrics),
-// which is also licensed under AGPL-3.0. See LICENSE for full license text.
-
 <script lang="ts">
+	// This file is part of utoaudio, licensed under AGPL-3.0.
+	// Derivative work based on AMLL (https://github.com/amll-dev/applemusic-like-lyrics),
+	// which is also licensed under AGPL-3.0. See LICENSE for full license text.
+
 	import { onMount } from 'svelte';
 	import type { LyricTheme } from '../../lib/types/lyrics';
 
@@ -24,8 +24,11 @@
 		album?: string | HTMLImageElement | HTMLVideoElement | HTMLCanvasElement;
 		/** Optional low-frequency volume `[0..1]` for beat-reactive motion. */
 		lowFreqVolume?: number;
-		/** Render mode. Defaults to `fluid`. */
-		mode?: FluidBackgroundMode;
+	/** Optional horizontal brightness mask: 0 = none, 1 = full. Dims the
+	 *  right side so overlaid lyrics stay readable against the fluid bg. */
+	brightnessMask?: number;
+	/** Render mode. Defaults to `fluid`. */
+	mode?: FluidBackgroundMode;
 	}
 
 	let {
@@ -37,6 +40,7 @@
 		album,
 		lowFreqVolume = 1,
 		mode = 'fluid',
+		brightnessMask = 0,
 	}: Props = $props();
 
 	let canvas = $state<HTMLCanvasElement | null>(null);
@@ -51,7 +55,11 @@ void main() {
 	gl_Position = vec4(a_pos, 0.0, 1.0);
 }`;
 
-	// highp enough for desktop/mobile; texture built from theme.palette.
+	// 2D color field + domain warping for the fluid, mixing AMLL look.
+	// Instead of a 1D rotating palette (which produces visible colour
+	// "columns"), we build a smooth 2D colour field from the theme palette
+	// and apply multiple layers of sine-based UV distortion so colours flow
+	// and partially mix like Apple Music's mesh-gradient background.
 	const FRAG = `precision highp float;
 varying vec2 v_uv;
 uniform sampler2D u_palette;
@@ -60,6 +68,7 @@ uniform float u_volume;
 uniform float u_alpha;
 uniform float u_mode; // 0 fluid, 1 gradient, 2 blur, 3 solid
 uniform float u_flow;
+uniform float u_brightness_mask;
 uniform vec3 u_solid;
 
 const float INV_255 = 1.0 / 255.0;
@@ -70,27 +79,38 @@ const vec2 GRADIENT_NOISE_B = vec2(0.06711056, 0.00583715);
 float gradientNoise(in vec2 uv) {
 	return fract(GRADIENT_NOISE_A * fract(dot(uv, GRADIENT_NOISE_B)));
 }
-vec2 rot(in vec2 v, float a) {
-	float s = sin(a); float c = cos(a);
-	return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+
+// Single layer of domain warping: offset UVs by a sine field so the
+// colour field flows and mixes organically rather than rotating rigidly.
+vec2 warp(vec2 uv, float t, float freq, float amp) {
+	vec2 w;
+	w.x = sin(uv.y * freq + t) * amp;
+	w.y = cos(uv.x * freq + t * 1.3) * amp;
+	return uv + w;
 }
+
 void main() {
-	float volumeEffect = u_volume * 2.0;
-	float timeVolume = u_time + u_volume;
+	float t = u_time * u_flow * 0.5;
 	float dither = INV_255 * gradientNoise(gl_FragCoord.xy) - HALF_INV_255;
 
-	vec2 centered = v_uv - vec2(0.2);
-	vec2 rotated = rot(centered, timeVolume * 2.0 * u_flow);
-	float scale = max(0.001, 1.0 - volumeEffect);
-	vec2 uv = rotated * scale + vec2(0.5);
-	// Soften sampling for "blur" mode.
+	vec2 uv = v_uv;
+
+	// Two layers of domain warping at different frequencies/phases — this
+	// is what gives the "fluid" mixing look rather than a rigid rotation.
+	uv = warp(uv, t * 0.6, 2.0, 0.12);
+	uv = warp(uv, t * 0.9 + 5.0, 3.5, 0.08);
+
+	// Slow zoom in/out for subtle breathing motion.
+	float zoom = 1.0 + sin(t * 0.3) * 0.08;
+	uv = (uv - 0.5) * zoom + 0.5;
+
+	// Soften sampling for "blur" mode with an extra offset.
 	if (u_mode > 1.5 && u_mode < 2.5) {
 		uv += vec2(sin(u_time * 0.5), cos(u_time * 0.5)) * 0.05;
 	}
 
 	vec4 result;
 	if (u_mode > 2.5) {
-		// solid
 		result = vec4(u_solid, 1.0);
 	} else {
 		result = texture2D(u_palette, uv);
@@ -100,10 +120,12 @@ void main() {
 	result.rgb *= alphaFactor;
 	result.a *= alphaFactor;
 
-	// gradient mode: no noise, no flow tint — just the palette as a soft wash.
+	// fluid mode: add dither to prevent banding in the smooth gradients.
 	if (u_mode < 0.5) {
 		result.rgb += vec3(dither);
 	}
+
+	result.rgb *= 1.0 - u_brightness_mask * v_uv.x * 0.5;
 
 	float dist = distance(v_uv, vec2(0.5));
 	float vignette = smoothstep(0.8, 0.3, dist);
@@ -152,33 +174,58 @@ void main() {
 		return prog;
 	}
 
-	/** Build a 1D-friendly palette texture from the theme palette (or fallbacks). */
+	/** Build a smooth 2D colour-field texture from the theme palette using
+	 *  inverse-distance-weighting interpolation. This replaces the old 1D
+	 *  palette strip that produced visible colour "columns" when rotated. */
 	function buildPalette(): void {
 		if (!gl) return;
 		const palette = theme?.palette && theme.palette.length > 0 ? theme.palette : ['#1a1a2e', '#16213e', '#0f3460', '#533483'];
-		const cells = Math.max(palette.length, 4);
-		const data = new Uint8Array(cells * 4);
-		palette.forEach((hex, i) => {
-			const c = hexToRgb(hex);
-			data[i * 4] = c.r;
-			data[i * 4 + 1] = c.g;
-			data[i * 4 + 2] = c.b;
-			data[i * 4 + 3] = 255;
-		});
-		// Pad with the last colour if palette shorter than cells.
-		const last = palette[palette.length - 1];
-		const lr = hexToRgb(last);
-		for (let i = palette.length; i < cells; i++) {
-			data[i * 4] = lr.r;
-			data[i * 4 + 1] = lr.g;
-			data[i * 4 + 2] = lr.b;
-			data[i * 4 + 3] = 255;
+		const colors = palette.map(hexToRgb);
+
+		// Scattered normalised positions for each palette colour. More
+		// colours → more positions, spread across the unit square.
+		const positions = [
+			[0.12, 0.15], [0.88, 0.18], [0.15, 0.85], [0.85, 0.88],
+			[0.50, 0.25], [0.30, 0.60], [0.70, 0.55], [0.50, 0.80],
+		];
+
+		const size = 64; // 64×64 — enough resolution for smooth gradients
+		const data = new Uint8Array(size * size * 4);
+
+		for (let y = 0; y < size; y++) {
+			for (let x = 0; x < size; x++) {
+				const px = x / (size - 1);
+				const py = y / (size - 1);
+
+				// Inverse distance weighting: each pixel's colour is the
+				// weighted average of all palette colours, weighted by
+				// 1/(dist² + ε). This produces smooth, organic blending.
+				let r = 0, g = 0, b = 0, totalW = 0;
+				for (let i = 0; i < colors.length; i++) {
+					const pos = positions[i % positions.length] ?? positions[0];
+					const dx = px - pos[0];
+					const dy = py - pos[1];
+					const distSq = dx * dx + dy * dy;
+					const w = 1 / (distSq + 0.005);
+					r += colors[i].r * w;
+					g += colors[i].g * w;
+					b += colors[i].b * w;
+					totalW += w;
+				}
+
+				const idx = (y * size + x) * 4;
+				data[idx] = Math.round(r / totalW);
+				data[idx + 1] = Math.round(g / totalW);
+				data[idx + 2] = Math.round(b / totalW);
+				data[idx + 3] = 255;
+			}
 		}
+
 		if (!paletteTex) paletteTex = gl.createTexture();
 		gl.bindTexture(gl.TEXTURE_2D, paletteTex);
-		gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, cells, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
-		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+		gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.MIRRORED_REPEAT);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
 		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
 		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 	}
@@ -236,6 +283,7 @@ void main() {
 		gl.uniform1f(uniforms.u_alpha, 1);
 		gl.uniform1f(uniforms.u_mode, modeIndex(mode));
 		gl.uniform1f(uniforms.u_flow, flowSpeed);
+		gl.uniform1f(uniforms.u_brightness_mask, brightnessMask ?? 0);
 		const solid = theme ? hexToRgb(theme.color) : { r: 30, g: 30, b: 46 };
 		gl.uniform3f(uniforms.u_solid, solid.r / 255, solid.g / 255, solid.b / 255);
 		gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -254,7 +302,7 @@ void main() {
 		quadBuf = gl.createBuffer();
 		gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
 		gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
-		for (const u of ['u_palette', 'u_time', 'u_volume', 'u_alpha', 'u_mode', 'u_flow', 'u_solid']) {
+		for (const u of ['u_palette', 'u_time', 'u_volume', 'u_alpha', 'u_mode', 'u_flow', 'u_brightness_mask', 'u_solid']) {
 			uniforms[u] = gl.getUniformLocation(program, u);
 		}
 		buildPalette();

@@ -1,2 +1,6 @@
 packages:
   - apps/desktop
+allowBuilds:
+  '@parcel/watcher': false
+  esbuild: false
+  ttf2woff2: false

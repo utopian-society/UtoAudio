@@ -82,7 +82,7 @@ All submodules point to forks under https://github.com/utopian-society/. See `.g
 ## What is NOT done (hand-off from progress.md)
 
 1. Android cross-build wiring (`oboe-shared-stdcxx` feature).
-2. Resolve the stale upstream DSD test and inherited clippy warnings (documented in progress.md).
+2. Resolve the stale upstream DSD test and remaining inherited clippy warnings in untouched upstream files (dsd_engine, uac2, api/audio_api.rs — 9 warnings; 4 warnings in touched files were fixed by prompt 23).
 3. Wire library-wide search to the SQLite `search_library` command (currently filters in-memory entries).
 4. Wire `get_library_index` to the frontend for SQLite-backed browsing (currently uses live `scan_directory`).
 5. Extract metadata (ID3/Vorbis/FLAC tags) during `rescan_library` via `lofty`.

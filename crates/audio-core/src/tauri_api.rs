@@ -84,6 +84,16 @@ pub struct SongInfo {
     /// Optional duration in seconds (used for UI; the engine re-probes if absent).
     #[serde(default)]
     pub duration_secs: Option<f64>,
+    /// Absolute path to cover art (discovered during library scan), if any.
+    #[serde(default)]
+    pub album_art_path: Option<String>,
+    /// Native sample rate of the track (filled by the frontend after probing).
+    /// Used to configure the DAC for bit-perfect output.
+    #[serde(default)]
+    pub sample_rate: Option<u32>,
+    /// Bit depth of the track (16, 24, 32). Used for DAC format selection.
+    #[serde(default)]
+    pub bits_per_sample: Option<u16>,
 }
 
 impl From<SongInfo> for PathBuf {
@@ -613,6 +623,29 @@ impl AudioEngine {
     }
 }
 
+/// Quick probe of an audio file — returns native sample rate, channels, and
+/// duration without decoding the entire file.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProbeInfo {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub duration_secs: f64,
+    #[serde(default)]
+    pub bits_per_sample: Option<u16>,
+}
+
+pub fn probe_audio_file(path: &str) -> Result<ProbeInfo, String> {
+    use std::path::Path;
+    let probe = rust_lib_flick_player::audio::decoder::probe_file(Path::new(path))
+        .map_err(|e| format!("probe failed: {e}"))?;
+    Ok(ProbeInfo {
+        sample_rate: probe.source_info.original_sample_rate,
+        channels: probe.source_info.channels as u16,
+        duration_secs: probe.source_info.duration_secs,
+        bits_per_sample: probe.source_info.bits_per_sample,
+    })
+}
+
 impl Default for AudioEngine {
     fn default() -> Self {
         Self::new()
@@ -635,6 +668,12 @@ pub async fn run(engine: Arc<AudioEngine>) -> Result<(), AudioError> {
     // (or no engine was ever prepared) we still return cleanly.
     engine.shutdown.notified().await;
     Ok(())
+}
+
+/// Extract embedded cover art from an audio file (delegates to Flick's scanner).
+/// Returns raw image bytes (typically JPEG or PNG), or `None` if no art is found.
+pub fn extract_embedded_artwork(path: &str) -> Option<Vec<u8>> {
+    rust_lib_flick_player::api::scanner::extract_embedded_artwork(path.to_string())
 }
 
 #[cfg(test)]

@@ -170,6 +170,9 @@ export interface LyricPlayerProps {
 	isSeeking?: boolean;
 	/** Whether to render the fluid album-art background. Default `false`. */
 	enableFluidBackground?: boolean;
+	/** Override the lyric font size in CSS pixels. When omitted, the player
+	 *  derives a responsive size from the viewport (`max(5vh, 2.5vw)`). */
+	fontSize?: number;
 }
 
 /**

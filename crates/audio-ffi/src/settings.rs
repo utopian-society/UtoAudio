@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -18,6 +18,44 @@ pub struct Settings {
     pub crossfade: Option<CrossfadeSettings>,
     pub convolver: Option<ConvolverSettings>,
     pub lyric_font_size: Option<u32>,
+    pub output_device: Option<OutputDeviceSettings>,
+    pub last_played_track: Option<LastPlayedTrack>,
+    /// Playback queue repeat mode: `"sequential"`, `"repeat-one"`, `"shuffle"`.
+    /// Persisted so the user's choice survives app restarts.
+    #[serde(default)]
+    pub repeat_mode: Option<String>,
+    /// Current playback queue index. Persisted alongside the queue so the
+    /// active position is restored on app restart.
+    #[serde(default)]
+    pub queue_index: Option<i64>,
+    /// Global music root directory. All library paths are stored relative to this.
+    /// If empty, defaults to the first scan root or a sensible default.
+    #[serde(default)]
+    pub music_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastPlayedTrack {
+    pub path: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub artist: Option<String>,
+    #[serde(default)]
+    pub album: Option<String>,
+    #[serde(default)]
+    pub duration_secs: Option<f64>,
+    #[serde(default)]
+    pub album_art_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputDeviceSettings {
+    pub backend: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alsa_device: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

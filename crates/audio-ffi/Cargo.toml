@@ -24,3 +24,7 @@ serde = { workspace = true }
 serde_json = "1"
 tokio = { workspace = true, features = ["sync"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
+# lofty is already in the workspace dep tree via audio-core; declared here
+# so `audio-ffi` can extract embedded lyrics tags directly without touching
+# the audio-core adapter or the Flick submodule.
+lofty = "0.21"

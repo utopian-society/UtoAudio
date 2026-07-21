@@ -30,14 +30,5 @@ export {
 	MAX_LRC_TIMESTAMP,
 } from '../../lib/types/lyrics';
 
-/** Spring parameters for the scroll / scale springs (re-exported for tuning). */
-export {
-	defaultBGSpringParams,
-	defaultPosYSpringParams,
-	defaultScaleSpringParams,
-	Spring,
-} from './spring';
-export type { SpringParams } from './spring';
-
 /** Background rendering modes supported by {@link FluidBackground}. */
 export type { FluidBackgroundMode } from './FluidBackground.svelte';

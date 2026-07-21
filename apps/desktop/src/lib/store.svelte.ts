@@ -7,6 +7,9 @@ export const appState = $state({
   equalizer: null as EqualizerSettings | null,
   crossfade: null as CrossfadeSettings | null,
   convolver: null as ConvolverSettings | null,
+  outputDevice: null as OutputDeviceSettings | null,
+  alsaDevices: [] as string[],
+  alsaDevicesLoaded: false,
 });
 
 interface EqualizerSettings {
@@ -21,6 +24,10 @@ interface CrossfadeSettings {
 interface ConvolverSettings {
   enabled: boolean;
   mix: number;
+}
+export interface OutputDeviceSettings {
+  backend: string;
+  alsaDevice?: string;
 }
 
 let rehydrated = false;
@@ -40,6 +47,7 @@ export async function rehydrateSettings(): Promise<void> {
     if (s.equalizer) appState.equalizer = s.equalizer as EqualizerSettings;
     if (s.crossfade) appState.crossfade = s.crossfade as CrossfadeSettings;
     if (s.convolver) appState.convolver = s.convolver as ConvolverSettings;
+    if (s.output_device) appState.outputDevice = s.output_device as OutputDeviceSettings;
   } catch (e) {
     console.warn('[store] rehydrateSettings failed:', e);
   }
@@ -64,6 +72,7 @@ async function persistSettings(): Promise<void> {
         equalizer: appState.equalizer,
         crossfade: appState.crossfade,
         convolver: appState.convolver,
+        output_device: appState.outputDevice,
       },
     });
   } catch (e) {
@@ -101,4 +110,28 @@ export function setCrossfade(cf: CrossfadeSettings | null): void {
 export function setConvolver(cv: ConvolverSettings | null): void {
   appState.convolver = cv;
   scheduleSave();
+}
+
+export function setOutputDevice(od: OutputDeviceSettings): void {
+  appState.outputDevice = od;
+  scheduleSave();
+}
+
+export async function ensureAlsaDevices(): Promise<string[]> {
+  if (appState.alsaDevicesLoaded) return appState.alsaDevices;
+  try {
+    const devices = await invoke<string[]>('list_alsa_devices');
+    appState.alsaDevices = devices;
+    appState.alsaDevicesLoaded = true;
+    return devices;
+  } catch {
+    appState.alsaDevices = [];
+    appState.alsaDevicesLoaded = true;
+    return [];
+  }
+}
+
+export async function refreshAlsaDevices(): Promise<string[]> {
+  appState.alsaDevicesLoaded = false;
+  return ensureAlsaDevices();
 }

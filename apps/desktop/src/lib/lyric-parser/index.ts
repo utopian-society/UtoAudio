@@ -100,13 +100,17 @@ function finalizeEndTimes(lines: LyricLine[]): LyricLine[] {
 	return lines;
 }
 
+/**
+ * Parse lyric content using the AMLL parser appropriate for the format.
+ * Format detection is now done in the Rust backend; this function just
+ * dispatches to the right AMLL parser.
+ */
 export function parseLyrics(
 	content: string,
-	format?: LyricFormat,
+	format: LyricFormat = 'ttml',
 ): Promise<LyricLine[]> {
 	const run = (): LyricLine[] => {
-		const fmt = format ?? detectFormat(content);
-		switch (fmt) {
+		switch (format) {
 			case 'ttml':
 				return parseTTML(content);
 			case 'yrc':
@@ -114,7 +118,8 @@ export function parseLyrics(
 			case 'qrc':
 				return parseQrcRaw(content);
 			case 'lrc':
-			default:
+				// LRC should have been converted to TTML by the backend.
+				// Fall back to AMLL LRC parser if we somehow receive raw LRC.
 				return parseLrcRaw(content);
 		}
 	};
@@ -129,11 +134,10 @@ export function parseLyrics(
 
 export function parseLyricsFull(
 	content: string,
-	format?: LyricFormat,
+	format: LyricFormat = 'ttml',
 ): Promise<LyricSource> {
 	const run = (): LyricSource => {
-		const fmt = format ?? detectFormat(content);
-		switch (fmt) {
+		switch (format) {
 			case 'ttml': {
 				const { lines, metadata } = parseTTMLWithMetadata(content);
 				return { lines: finalizeEndTimes(lines), metadata };
@@ -143,7 +147,6 @@ export function parseLyricsFull(
 			case 'qrc':
 				return { lines: finalizeEndTimes(parseQrcRaw(content)) };
 			case 'lrc':
-			default:
 				return { lines: finalizeEndTimes(parseLrcRaw(content)) };
 		}
 	};
@@ -154,24 +157,4 @@ export function parseLyricsFull(
 			resolve(run());
 		}
 	});
-}
-
-export function detectFormat(content: string): LyricFormat {
-	const head = content.slice(0, 512);
-	if (
-		/^\s*<\?xml|^\s*<tt[\s>]/i.test(head) ||
-		/<tt[\s>]/i.test(content)
-	) {
-		return 'ttml';
-	}
-	if (/^\[\d+,\d+\]/m.test(content) && /\(\d+,\d+,0\)/.test(content)) {
-		return 'yrc';
-	}
-	if (/^\[\d+,\d+\]/m.test(content) && /\(\d+,\d+\)/.test(content)) {
-		return 'qrc';
-	}
-	if (/^\[\d+:\d+/m.test(content)) {
-		return 'lrc';
-	}
-	return 'lrc';
 }

@@ -71,7 +71,10 @@ export async function extractTheme(
 
 	if (typeof src === 'string') {
 		const img = new Image();
-		img.crossOrigin = 'anonymous';
+		// Blob URLs (from URL.createObjectURL) don't support CORS — setting
+		// crossOrigin on them causes a decode failure. Only set it for
+		// http(s) URLs where the canvas would otherwise be tainted.
+		if (!src.startsWith('blob:')) img.crossOrigin = 'anonymous';
 		img.src = src;
 		try {
 			await img.decode();
@@ -135,16 +138,15 @@ export async function extractTheme(
 	) => Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b);
 
 	for (const cand of sorted) {
-		if (palette.length >= 5) break;
-		// Drop near-blacks / near-whites as they don't make good gradient stops.
-		const { l, s } = hsl(cand.r, cand.g, cand.b);
-		if (l < 0.08 || l > 0.95) continue;
-		if (s < 0.12) continue;
-		if (palette.some((p) => colorDist(p, cand) < 60)) continue;
+		if (palette.length >= 8) break;
+		// Keep all colours — near-blacks and near-whites are brightened/
+		// dimmed by the caller's `brightenColor` so they read as gradient
+		// stops. Only skip exact duplicates (similarity threshold).
+		if (palette.some((p) => colorDist(p, cand) < 40)) continue;
 		palette.push(cand);
 	}
 
-	// Fallback: keep the most-vivid top buckets regardless of similarity.
+	// Fallback: keep the top buckets regardless of similarity.
 	if (palette.length < 3) {
 		for (const cand of sorted) {
 			if (palette.includes(cand)) continue;

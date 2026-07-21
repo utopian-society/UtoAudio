@@ -13,6 +13,11 @@ pub mod tauri_api;
 // through this crate's namespace (preserving the existing import paths).
 pub use rust_lib_flick_player::audio::backend::AudioBackend;
 pub use rust_lib_flick_player::audio::engine::{create_audio_engine, AudioEngineHandle};
+pub use rust_lib_flick_player::audio::engine::set_preferred_bits_per_sample;
+#[cfg(target_os = "linux")]
+pub use rust_lib_flick_player::audio::engine::{list_alsa_output_devices, set_linux_alsa_device};
+#[cfg(target_os = "linux")]
+pub use rust_lib_flick_player::audio::engine::release_reserved_alsa_device;
 pub use rust_lib_flick_player::audio::manager::{
     AudioCapability, AudioCapabilitySnapshot, EngineManager,
 };
@@ -24,7 +29,7 @@ pub use rust_lib_flick_player::audio::strategy::{
 pub use tauri_api::{
     AudioEngine, AudioError, AudioEventInfo, ConvolverConfig, CrossfadeConfig,
     CrossfadeCurveSerde, EqualizerPreset, EQBand, FxConfig, PlaybackProgressInfo,
-    PlaybackState, SongInfo, Uac2DeviceInfo,
+    PlaybackState, ProbeInfo, SongInfo, Uac2DeviceInfo, probe_audio_file,
 };
 
 // Re-export the submodule's machine-side playback state under a suffixed name
